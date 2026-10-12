@@ -21,7 +21,7 @@ import path from "node:path";
 const repoRoot = path.resolve(import.meta.dir, "../../../../../../..");
 const appDir = path.join(repoRoot, "apps/chord-tauri");
 const srcTauri = path.join(appDir, "src-tauri");
-const config = JSON.parse(fs.readFileSync(path.join(srcTauri, "tauri.conf.json"), "utf8"));
+const config = await Bun.file(path.join(srcTauri, "tauri.conf.json")).json();
 const identity: string | undefined =
 	process.env.APPLE_SIGNING_IDENTITY ?? config.bundle?.macOS?.signingIdentity;
 if (!identity) {
@@ -37,7 +37,7 @@ const app = path.join(bundleDir, `${productName}.app`);
 // The embedded Bun runtime (rbun) ships as a framework dylib; tauri copies it from
 // `bundle.macOS.frameworks` and signs it, the app's rpath points at Contents/Frameworks.
 const bunRuntime = path.join(app, "Contents/Frameworks/libbun_embed.dylib");
-if (!fs.existsSync(bunRuntime)) {
+if (!(await Bun.file(bunRuntime).exists())) {
 	throw new Error(`embedded Bun runtime missing from bundle: ${bunRuntime}`);
 }
 

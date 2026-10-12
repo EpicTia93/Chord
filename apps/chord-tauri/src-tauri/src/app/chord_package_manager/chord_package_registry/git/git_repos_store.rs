@@ -58,6 +58,11 @@ impl GitReposStore {
                 changed = true;
             }
             repo.head_short_sha = Some(resolved_rev.chars().take(7).collect());
+            let was_monorepo = repo.is_monorepo;
+            if let Err(error) = detect_monorepo(repo) {
+                log::warn!("Unable to detect packages in {}: {error}", repo.slug);
+            }
+            changed |= repo.is_monorepo != was_monorepo;
         }
 
         if changed {
@@ -136,7 +141,8 @@ impl GitReposStore {
             }
         }
         let repos_root = self.github_repos_dir()?;
-        let repo = materialize_repo_head(&repo_ref, &repos_root)?;
+        let mut repo = materialize_repo_head(&repo_ref, &repos_root)?;
+        detect_monorepo(&mut repo)?;
         self.upsert(repo.clone())?;
         Ok(repo)
     }
@@ -176,9 +182,7 @@ impl GitReposStore {
 
         let mut repo = materialize_repo_head(&repo_ref, &repos_root)?;
         repo.is_monorepo = current_repo.is_monorepo;
-        if repo.is_monorepo {
-            super::super::validate_monorepo_path(&repo.local_abspath.to_string_lossy())?;
-        }
+        detect_monorepo(&mut repo)?;
         self.upsert(repo.clone())?;
         Ok(repo)
     }
@@ -195,7 +199,8 @@ impl GitReposStore {
         for spec in repos {
             let repo_path = spec.repo_ref.local_abspath(&repos_root, &spec.rev);
             materialize_repo_at_revision(&spec.repo_ref, &repo_path, &spec.rev)?;
-            let repo = spec.repo_ref.into_pinned_repo(&repos_root, spec.rev);
+            let mut repo = spec.repo_ref.into_pinned_repo(&repos_root, spec.rev);
+            detect_monorepo(&mut repo)?;
             next_repos.insert(repo.slug.clone(), repo);
         }
 
@@ -230,6 +235,7 @@ impl GitReposStore {
             repo.is_monorepo = current_repos
                 .get(&repo.slug)
                 .is_some_and(|previous| previous.is_monorepo);
+            detect_monorepo(&mut repo)?;
             current_repos.insert(repo.slug.clone(), repo);
         }
 
@@ -264,6 +270,18 @@ impl GitReposStore {
         self.upsert(repo.clone())?;
         Ok(repo)
     }
+}
+
+fn detect_monorepo(repo: &mut GitRepo) -> Result<()> {
+    // A standalone package owns its root chords/ tree, including any vendored packages.
+    if repo.is_monorepo
+        || (!repo.local_abspath.join("chords").is_dir()
+            && !super::super::discover_monorepo_packages(&repo.local_abspath)?.is_empty())
+    {
+        super::super::validate_monorepo_path(&repo.local_abspath.to_string_lossy())?;
+        repo.is_monorepo = true;
+    }
+    Ok(())
 }
 
 fn validate_local_link(cached_path: &std::path::Path, path: &str) -> Result<PathBuf> {
@@ -362,6 +380,63 @@ mod local_link_tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn test_repo(root: PathBuf) -> GitRepo {
+        serde_json::from_value(serde_json::json!({
+            "owner": "test", "name": "repo", "slug": "test/repo",
+            "url": "https://github.com/test/repo", "localAbspath": root,
+            "headShortSha": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn auto_detection_finds_root_and_nested_packages() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("monorepo");
+        fs::create_dir_all(&root).unwrap();
+        let mut repo = test_repo(root.clone());
+        for folder in [
+            "chords-one",
+            "group/deeper/chords-two",
+            "packages/chords-three",
+        ] {
+            let path = root.join(folder);
+            fs::create_dir_all(path.join("chords")).unwrap();
+            detect_monorepo(&mut repo).unwrap();
+            assert!(repo.is_monorepo);
+            fs::remove_dir_all(path).unwrap();
+            repo.is_monorepo = false;
+        }
+        fs::create_dir_all(root.join("utility")).unwrap();
+        fs::create_dir_all(root.join("node_modules/chords-dependency")).unwrap();
+        detect_monorepo(&mut repo).unwrap();
+        assert!(!repo.is_monorepo);
+    }
+
+    #[test]
+    fn auto_detection_keeps_standalone_packages_with_vendored_chords() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("cached");
+        fs::create_dir_all(root.join("chords/@test/chords-vendored")).unwrap();
+        let mut repo = test_repo(root);
+        detect_monorepo(&mut repo).unwrap();
+        assert!(!repo.is_monorepo);
+    }
+
+    #[test]
+    fn auto_detection_rejects_duplicate_package_names_before_classifying() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("monorepo");
+        for folder in ["chords-one", "group/chords-two"] {
+            let path = root.join(folder);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("package.json"), r#"{"name":"@test/duplicate"}"#).unwrap();
+        }
+        let mut repo = test_repo(root);
+        assert!(detect_monorepo(&mut repo).is_err());
+        assert!(!repo.is_monorepo);
     }
 
     #[test]

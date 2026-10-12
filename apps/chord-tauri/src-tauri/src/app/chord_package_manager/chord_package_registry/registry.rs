@@ -17,7 +17,7 @@ pub struct ChordPackageRegistry {
 }
 
 impl ChordPackageRegistry {
-    /// Merge remote sources first so every locally linked source overrides GitHub packages.
+    /// Default config packages have the lowest priority, followed by GitHub and then local sources.
     pub fn import_all_packages(&self) -> anyhow::Result<HashMap<String, RawChordPackage>> {
         let mut packages = HashMap::new();
 

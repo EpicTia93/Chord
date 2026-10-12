@@ -159,14 +159,14 @@ args = ["/Application/Visual Studio Code.app"]
 file = "@keychord/chords-menu/js/menu.js"
 
 [chords]
-fh = { name = "File: Here", 'emit:command' = [ "explorer.newFile" ] }
-mc = { name = "Menu: Columns", 'emit:menu' = [
+fh = { name = "File: Here", '@input:command' = [ "explorer.newFile" ] }
+mc = { name = "Menu: Columns", '@input:menu' = [
 	"View",
 	"Columns"
 ] }
 ```
 
-The top-level `on` table maps invocation targets to JavaScript filenames. Chords must reference those targets with `js:<name>`, most commonly `js:default`.
+The top-level `on` table maps event names to JavaScript filenames. Chords reference those handlers with `@input:<event>`, or use `@init`, `@keydown`, `@keyup`, and `@keypress` for live buffer events. Any specifier can retain the handler's return value with `=<identifier>`; later handlers can receive it through `$identifier`. See [the event contract](./scripting.md#chord-events-and-persistent-return-values) for examples and `this.event` keyboard data.
 
 Chord embeds [Bun](https://bun.com) as a runtime using [rbun](https://github.com/KeyChord/rbun).
 

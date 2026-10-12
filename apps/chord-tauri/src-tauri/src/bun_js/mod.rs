@@ -189,13 +189,13 @@ async fn build_engine(handle: Option<AppHandle>) -> anyhow::Result<BunEngine> {
     })
 }
 
-async fn ensure_engine(handle: AppHandle) -> anyhow::Result<AsyncContext> {
+async fn ensure_engine(handle: Option<AppHandle>) -> anyhow::Result<AsyncContext> {
     let existing = BUN_ENGINE.with(|cell| cell.borrow().as_ref().map(|engine| engine.ctx.clone()));
     if let Some(ctx) = existing {
         return Ok(ctx);
     }
 
-    let engine = build_engine(Some(handle)).await?;
+    let engine = build_engine(handle).await?;
     let out = engine.ctx.clone();
     BUN_ENGINE.with(|cell| {
         *cell.borrow_mut() = Some(engine);
@@ -215,7 +215,7 @@ where
     JsWorker::global()
         .run(move |runtime| {
             runtime.block_on(async move {
-                let async_ctx: AsyncContext = ensure_engine(handle).await?;
+                let async_ctx: AsyncContext = ensure_engine(Some(handle)).await?;
 
                 async_ctx.async_with(|ctx| f(ctx)).await
             })
@@ -314,6 +314,19 @@ pub async fn run_standalone_module_with_args(path: &Path, args: Vec<String>) -> 
         })
     })
     .await
+}
+
+#[cfg(test)]
+pub(crate) async fn with_test_js<F, R>(f: F) -> anyhow::Result<R>
+where
+    F: Send + 'static + for<'js> FnOnce(Ctx<'js>) -> LocalBoxFuture<'js, anyhow::Result<R>>,
+    R: Send + 'static,
+{
+    JsWorker::global()
+        .run(move |runtime| {
+            runtime.block_on(async move { ensure_engine(None).await?.async_with(f).await })
+        })
+        .await
 }
 
 fn parse_cli_arg(arg: String) -> serde_json::Value {

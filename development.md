@@ -151,20 +151,27 @@ version without changing your local files.
 
 In Settings → Chords → **Chord Monorepos**, add a GitHub repository or enter an
 absolute local monorepo path and click the link icon. A GitHub monorepo can also
-be linked to a local checkout using its link icon. Chord discovers immediate
-directories matching `packages/chords-*`; other directories and nested packages
-are ignored. Each matching folder is loaded as its own package, using its
-`package.json` name or, when absent, its folder name.
+be linked to a local checkout using its link icon. **Add Repo** automatically
+detects a monorepo when it contains `chords-*` directories. Chord discovers these
+folders directly below the root or nested in other folders; no `packages/`
+directory is required. Each matching folder is loaded as its own package, using
+its `package.json` name or, when absent, its folder name. A matching folder must
+contain `package.json` or a `chords/`, `js/`, or `bin/` directory; empty folders
+and leftover build folders are ignored. Discovery stops at each package and
+skips hidden directories (including `.git`, `.jj`, `.moon`, and `.build`),
+`node_modules`, and `target`, so vendored dependencies and build outputs are
+not treated as separate packages. Repos with their own root `chords/` folder
+continue to load as standalone packages.
 
 Local links persist across restarts. **Reload** rescans the monorepo, including
 new or removed packages, and rebuilds the JS runtime. **Unlink** stops loading a
 standalone local monorepo or restores the cached GitHub source for a linked repo;
 it leaves local files intact.
 
-Packages with the same name are overridden in this order (last wins): cached
-GitHub sources, standalone local monorepos, locally linked GitHub sources, and
-individual local folders. All local sources therefore take precedence over
-remote GitHub packages. Paths and repo slugs are sorted within each group for
+Packages with the same name are overridden in this order (last wins): default
+config packages, cached GitHub sources, standalone local monorepos, locally
+linked GitHub sources, and individual local folders. All local sources therefore
+take precedence over remote GitHub packages. Paths and repo slugs are sorted within each group for
 consistent results. Duplicate package names within one monorepo are rejected.
 
 ## Stores

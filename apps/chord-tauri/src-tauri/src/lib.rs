@@ -17,6 +17,7 @@ mod constants;
 pub mod git;
 mod mode;
 mod models;
+pub mod native_input;
 mod bun_js;
 mod logging;
 mod process;

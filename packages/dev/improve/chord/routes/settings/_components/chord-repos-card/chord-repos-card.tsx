@@ -57,8 +57,8 @@ function ChordReposCardContent({
             <CardTitle>{monorepos ? "Chord Monorepos" : "Chord Repos"}</CardTitle>
             <CardDescription>
               {monorepos
-                ? "Choose packages from packages/chords-* in a GitHub repo or local folder. Local packages override matching GitHub packages."
-                : "Added GitHub repos are cloned into the app cache. Locally linked packages take precedence."}
+                ? "Choose chords-* packages at the root or nested in a GitHub repo or local folder. Local packages override matching GitHub packages."
+                : "Added GitHub repos are cloned into the app cache. Monorepos are detected automatically. Locally linked packages take precedence."}
             </CardDescription>
           </div>
         </div>
@@ -188,7 +188,7 @@ function GitRepoRow({
         >
           <p className="text-xs text-muted-foreground">
             {repo.isMonorepo
-              ? "Use a local monorepo with packages/chords-* folders. Click Reload after editing files or adding packages. Unlink to restore the GitHub version."
+              ? "Use a local monorepo with chords-* folders at the root or nested within it. Click Reload after editing files or adding packages. Unlink to restore the GitHub version."
               : "Use a local copy of this package with the same package.json name. Edit its files, then click Reload to apply changes. Unlink to return to the installed version."}
           </p>
           <div className="flex flex-col gap-2 sm:flex-row">

@@ -2,8 +2,8 @@ use super::Key;
 use crate::models::path::FilePathslug;
 use crate::models::toml::TomlValue;
 use crate::models::{
-    Chord, ChordAction, ChordHint, ChordHintPattern, ChordTrigger, EmitChordAction,
-    ShellChordAction, ShortcutChordAction, SimulatedShortcut,
+    Chord, ChordAction, ChordEventTrigger, ChordHint, ChordHintPattern, ChordTrigger,
+    EmitChordAction, ShellChordAction, ShortcutChordAction, SimulatedShortcut,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -268,11 +268,36 @@ impl ParsedChordsFile {
         }
 
         for (k, v) in value {
-            if k.starts_with("emit:") {
-                let event_key = k.strip_prefix("emit:").unwrap_or_default().to_string();
-                let args = v.as_array().context("emit value must be an array")?;
+            if k.starts_with('@') {
+                let Some((trigger, target)) = k[1..].split_once(':') else {
+                    anyhow::bail!("invalid event specifier {k:?}; expected @trigger:event");
+                };
+                let trigger = match trigger {
+                    "input" => ChordEventTrigger::Input,
+                    "init" => ChordEventTrigger::Init,
+                    "keydown" => ChordEventTrigger::Keydown,
+                    "keyup" => ChordEventTrigger::Keyup,
+                    "keypress" => ChordEventTrigger::Keypress,
+                    _ => anyhow::bail!("unsupported event trigger in {k:?}"),
+                };
+                let (event_key, assign_to) = match target.split_once('=') {
+                    Some((event, identifier)) => {
+                        anyhow::ensure!(
+                            is_event_identifier(identifier),
+                            "invalid return-value identifier in {k:?}"
+                        );
+                        (event, Some(identifier.to_string()))
+                    }
+                    None => (target, None),
+                };
+                anyhow::ensure!(!event_key.is_empty(), "missing event name in {k:?}");
+                let args = v
+                    .as_array()
+                    .with_context(|| format!("{k} value must be an array"))?;
                 actions.push(ChordAction::Emit(EmitChordAction {
-                    event_key,
+                    trigger,
+                    event_key: event_key.to_string(),
+                    assign_to,
                     args: args.clone(),
                 }));
             }
@@ -298,6 +323,14 @@ impl ParsedChordsFile {
             actions,
         })
     }
+}
+
+pub(crate) fn is_event_identifier(identifier: &str) -> bool {
+    let mut chars = identifier.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 impl FromStr for ParsedChordsFile {
@@ -372,6 +405,117 @@ impl FromStr for ParsedChordsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_input_actions() {
+        let file: ParsedChordsFile = r#"
+name = "Input actions"
+[on.click]
+file = "click.js"
+[chords]
+'j,(.+)' = { name = "Click", '@input:click' = ['$1'] }
+be = { name = "Beep", '@input:beep' = [] }
+mc = { name = "Menu", '@input:menu' = ['by-path', ['Window', 'Columns']] }
+"#
+        .parse()
+        .unwrap();
+
+        assert_eq!(file.handlers["click"].file, "click.js");
+        assert_eq!(file.chords.len(), 3);
+        for (trigger, event, args) in [
+            ("j,(.+)", "click", toml::Value::Array(vec!["$1".into()])),
+            ("be", "beep", toml::Value::Array(vec![])),
+            (
+                "mc",
+                "menu",
+                toml::Value::Array(vec![
+                    "by-path".into(),
+                    toml::Value::Array(vec!["Window".into(), "Columns".into()]),
+                ]),
+            ),
+        ] {
+            let chord = file
+                .chords
+                .iter()
+                .find(|chord| chord.raw_trigger == trigger)
+                .unwrap();
+            let [ChordAction::Emit(action)] = chord.actions.as_slice() else {
+                panic!("expected one input action for {trigger}");
+            };
+            assert_eq!(action.event_key, event);
+            assert_eq!(action.trigger, ChordEventTrigger::Input);
+            assert_eq!(action.assign_to, None);
+            assert_eq!(&action.args, args.as_array().unwrap());
+        }
+        assert_eq!(file.raw["chords"]["j,(.+)"]["@input:click"][0], "$1");
+    }
+
+    #[test]
+    fn input_actions_require_array_arguments() {
+        for value in ["'click'", "1", "{ x = 1 }"] {
+            let table: Table = format!("'@input:click' = {value}").parse().unwrap();
+            let error = ParsedChordsFile::parse_actions("jc", &table).unwrap_err();
+            assert_eq!(error.to_string(), "@input:click value must be an array");
+        }
+    }
+
+    #[test]
+    fn parses_all_event_triggers_and_return_assignments() {
+        for (specifier, trigger) in [
+            ("@input:click=result", ChordEventTrigger::Input),
+            ("@init:click=result", ChordEventTrigger::Init),
+            ("@keydown:click=result", ChordEventTrigger::Keydown),
+            ("@keyup:click=result", ChordEventTrigger::Keyup),
+            ("@keypress:click=result", ChordEventTrigger::Keypress),
+        ] {
+            let table: Table = format!("'{specifier}' = ['$result', '$1']")
+                .parse()
+                .unwrap();
+            let actions = ParsedChordsFile::parse_actions("j,(.*)", &table).unwrap();
+            let [ChordAction::Emit(action)] = actions.as_slice() else {
+                panic!("expected event action")
+            };
+            assert_eq!(action.trigger, trigger);
+            assert_eq!(action.event_key, "click");
+            assert_eq!(action.assign_to.as_deref(), Some("result"));
+            assert_eq!(action.args[0].as_str(), Some("$result"));
+        }
+        let table: Table = "'@init:@fixture/pkg:prepare=_context2' = []"
+            .parse()
+            .unwrap();
+        let actions = ParsedChordsFile::parse_actions("j,(.*)", &table).unwrap();
+        let ChordAction::Emit(action) = &actions[0] else {
+            panic!("expected event action")
+        };
+        assert_eq!(action.event_key, "@fixture/pkg:prepare");
+        assert_eq!(action.assign_to.as_deref(), Some("_context2"));
+    }
+
+    #[test]
+    fn rejects_invalid_event_specifiers() {
+        for specifier in [
+            "@keydown",
+            "@unknown:click",
+            "@input:",
+            "@init:click=",
+            "@keydown:click=1",
+            "@keypress:click=a-b",
+            "@keyup:click=a=b",
+        ] {
+            let table: Table = format!("'{specifier}' = []").parse().unwrap();
+            let error = ParsedChordsFile::parse_actions("j,(.*)", &table).unwrap_err();
+            assert!(error.to_string().contains(specifier));
+        }
+        for trigger in ["init", "keydown", "keyup", "keypress"] {
+            let table: Table = format!("'@{trigger}:click' = 'invalid'").parse().unwrap();
+            assert!(
+                ParsedChordsFile::parse_actions("j,(.*)", &table)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must be an array")
+            );
+        }
+    }
 
     #[test]
     fn parses_compact_help_ranges() {

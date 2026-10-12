@@ -309,6 +309,22 @@ fn set_app_needs_relaunch(ctx: Ctx, bundle_id: String, needs_relaunch: bool) -> 
     Ok(())
 }
 
+fn get_app_windows<'js>(ctx: Ctx<'js>, bundle_id: String) -> rbun::Result<Value<'js>> {
+    let windows = crate::native_input::get_app_windows(&bundle_id)
+        .or_throw_msg(&ctx, "failed to enumerate application windows")?;
+    rbun::serde::to_value(ctx.clone(), windows)
+        .or_throw_msg(&ctx, "failed to convert application windows")
+}
+
+async fn click<'js>(ctx: Ctx<'js>, options: Value<'js>) -> rbun::Result<()> {
+    let options: crate::native_input::ClickOptions =
+        rbun::serde::from_value(options).or_throw_msg(&ctx, "invalid click options")?;
+    tauri::async_runtime::spawn_blocking(move || crate::native_input::click(&options))
+        .await
+        .or_throw_msg(&ctx, "click worker failed")?
+        .or_throw_msg(&ctx, "window-targeted click failed")
+}
+
 async fn run_sudo_command<'js>(
     ctx: Ctx<'js>,
     program: String,
@@ -444,9 +460,7 @@ fn build_import_meta_namespace<'js>(
     let path = module_path.clone();
     namespace.set(
         "resolvePackageFile",
-        Func::from(move |ctx: Ctx<'js>, relative: String| {
-            package_file_for(&ctx, &path, &relative)
-        }),
+        Func::from(move |ctx: Ctx<'js>, relative: String| package_file_for(&ctx, &path, &relative)),
     )?;
 
     // `import.meta.chord.resolveNative("menu")`: the package's prebuilt Node-API add-on
@@ -462,6 +476,25 @@ fn build_import_meta_namespace<'js>(
     )?;
 
     Ok(namespace)
+}
+
+/// Compatibility for installed handlers built before `import.meta.chord` was introduced.
+/// Delegate to the module-bound helpers without trusting import.meta's mutable path or URL.
+fn resolve_with_import_meta<'js>(
+    ctx: &Ctx<'js>,
+    meta: Object<'js>,
+    name: &str,
+    relative: String,
+) -> rbun::Result<String> {
+    let namespace: Object<'js> = meta.get("chord").or_throw_msg(
+        ctx,
+        "expected import.meta with Chord's per-module resolvers",
+    )?;
+    let resolve: Function<'js> = namespace.get(name).or_throw_msg(
+        ctx,
+        "expected import.meta with Chord's per-module resolvers",
+    )?;
+    resolve.call((This(namespace), relative))
 }
 
 /// Attach `import.meta.chord` to every module Bun loads from disk.
@@ -492,12 +525,16 @@ impl ModuleDef for ChordModule {
         declare.declare("press")?;
         declare.declare("release")?;
         declare.declare("tap")?;
+        declare.declare("click")?;
+        declare.declare("getAppWindows")?;
         declare.declare("getGlobalHotkey")?;
         declare.declare("registerGlobalHotkey")?;
         declare.declare("setAppNeedsRelaunch")?;
         declare.declare("onAppLaunch")?;
         declare.declare("onAppTerminate")?;
         declare.declare("runSudoCommand")?;
+        declare.declare("resolveNativeModulePath")?;
+        declare.declare("resolvePackageFile")?;
         Ok(())
     }
 
@@ -513,13 +550,120 @@ impl ModuleDef for ChordModule {
         exports.export("press", Func::from(press))?;
         exports.export("release", Func::from(release))?;
         exports.export("tap", Func::from(tap))?;
+        exports.export("click", Func::from(Async(click)))?;
+        exports.export("getAppWindows", Func::from(get_app_windows))?;
         exports.export("getGlobalHotkey", Func::from(get_global_hotkey))?;
         exports.export("registerGlobalHotkey", Func::from(register_global_hotkey))?;
         exports.export("setAppNeedsRelaunch", Func::from(set_app_needs_relaunch))?;
         exports.export("onAppLaunch", Func::from(on_app_launch))?;
         exports.export("onAppTerminate", Func::from(on_app_terminate))?;
         exports.export("runSudoCommand", Func::from(Async(run_sudo_command)))?;
+        exports.export(
+            "resolveNativeModulePath",
+            Func::from(|ctx: Ctx<'js>, meta: Object<'js>, relative: String| {
+                resolve_with_import_meta(&ctx, meta, "resolveNative", relative)
+            }),
+        )?;
+        exports.export(
+            "resolvePackageFile",
+            Func::from(|ctx: Ctx<'js>, meta: Object<'js>, relative: String| {
+                resolve_with_import_meta(&ctx, meta, "resolvePackageFile", relative)
+            }),
+        )?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bun_js::{format_js_error, with_test_js};
+    use rbun::Module;
+
+    #[tokio::test]
+    async fn legacy_package_resolvers_use_the_bound_module_namespace() {
+        with_test_js(|ctx| {
+            Box::pin(async move {
+                let result = async {
+                    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+                    for (index, module_relpath) in
+                        ["js/tray.js", "js/@keychord/chords-tray/js/tray.js"]
+                            .into_iter()
+                            .enumerate()
+                    {
+                        let meta = Object::new(ctx.clone())?;
+                        meta.set(
+                            "chord",
+                            build_import_meta_namespace(&ctx, root.join(module_relpath))?,
+                        )?;
+                        // The old API accepts import.meta, but must never trust its mutable path.
+                        meta.set("path", "/different-package/js/tray.js")?;
+                        meta.set("url", "file:///different-package/js/tray.js")?;
+                        ctx.globals().set("__legacyResolverMeta", meta)?;
+                        Module::evaluate(
+                            ctx.clone(),
+                            format!("legacy_package_resolvers_{index}.js"),
+                            r#"
+import { resolveNativeModulePath, resolvePackageFile } from "chord";
+globalThis.__legacyResolverPaths = {
+    native: resolveNativeModulePath(globalThis.__legacyResolverMeta, "tray"),
+    file: resolvePackageFile(globalThis.__legacyResolverMeta, "bin/helper")
+};
+for (const resolve of [resolveNativeModulePath, resolvePackageFile]) {
+    for (const meta of [{ path: "/different-package/js/tray.js" }, { chord: {} }]) {
+        let rejected = false;
+        try { resolve(meta, "tray"); } catch { rejected = true; }
+        if (!rejected) throw new Error("accepted import.meta without a bound resolver");
+    }
+}
+for (const [resolve, path] of [
+    [resolveNativeModulePath, "../tray"],
+    [resolvePackageFile, "../outside"],
+    [resolvePackageFile, "/outside"]
+]) {
+    let rejected = false;
+    try { resolve(globalThis.__legacyResolverMeta, path); } catch { rejected = true; }
+    if (!rejected) throw new Error("accepted a path outside the package");
+}
+"#,
+                        )?
+                        .into_future::<()>()
+                        .await?;
+                        let paths: Object = ctx.globals().get("__legacyResolverPaths")?;
+                        let native: String = paths.get("native")?;
+                        let file: String = paths.get("file")?;
+                        let native_relpath = native_module_relpath("tray").unwrap();
+                        assert_eq!(
+                            PathBuf::from(native),
+                            root.join(
+                                resolve_logical_package_path(
+                                    Path::new(module_relpath),
+                                    &native_relpath,
+                                )
+                                .unwrap(),
+                            )
+                        );
+                        assert_eq!(
+                            PathBuf::from(file),
+                            root.join(
+                                resolve_logical_package_path(
+                                    Path::new(module_relpath),
+                                    Path::new("bin/helper"),
+                                )
+                                .unwrap(),
+                            )
+                        );
+                    }
+                    ctx.globals().remove("__legacyResolverMeta")?;
+                    ctx.globals().remove("__legacyResolverPaths")?;
+                    Ok::<(), rbun::Error>(())
+                }
+                .await;
+                result.map_err(|error| anyhow::anyhow!(format_js_error(&ctx, error)))
+            })
+        })
+        .await
+        .unwrap();
     }
 }

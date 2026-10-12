@@ -90,6 +90,21 @@ export interface ChordJsPackage {
 	files: Record<FilePathslug, string>;
 }
 
+/** The KeyboardEvent data exposed as a JavaScript handler's `this.event`. */
+export interface ChordKeyboardEvent {
+	type: string;
+	key: string;
+	code: string;
+	location: number;
+	ctrlKey: boolean;
+	shiftKey: boolean;
+	altKey: boolean;
+	metaKey: boolean;
+	repeat: boolean;
+	isComposing: boolean;
+	timeStamp: number;
+}
+
 /**
  * A handler is always a JavaScript module; native code is loaded by the module itself as a
  * Node-API add-on through `process.dlopen` (see `scripting.md`).
@@ -176,8 +191,18 @@ export interface DesktopAppManagerState {
 	appsMetadata: Record<string, DesktopAppMetadata>;
 }
 
+export enum ChordEventTrigger {
+	Input = "input",
+	Init = "init",
+	Keydown = "keydown",
+	Keyup = "keyup",
+	Keypress = "keypress",
+}
+
 export interface EmitChordAction {
+	trigger: ChordEventTrigger;
 	eventKey: string;
+	assignTo?: string;
 	args: any;
 }
 
@@ -205,6 +230,10 @@ export interface HandlerChordAction {
 	/** Key in the JS engine's `__RUST_HANDLER_REGISTRY`. */
 	handlerId: string;
 	eventArgs: any[];
+	/** Persistent JavaScript values for this chord's current matching interval. */
+	sequenceId?: string;
+	assignTo?: string;
+	keyboardEvent?: ChordKeyboardEvent;
 }
 
 export interface KeyboardState {

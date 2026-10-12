@@ -4,24 +4,36 @@ use anyhow::{Context, Result, ensure};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
-/// Only immediate packages/chords-* directories are chord packages.
+/// Find chords-* packages below the root, without descending into package contents.
 pub fn discover_monorepo_packages(root: &Path) -> Result<Vec<PathBuf>> {
-    let packages_dir = root.join("packages");
+    ensure!(root.is_dir(), "{} is not a monorepo folder", root.display());
     let mut paths = Vec::new();
-    for entry in fs::read_dir(&packages_dir).with_context(|| {
-        format!(
-            "Cannot read monorepo packages directory {}",
-            packages_dir.display()
-        )
-    })? {
-        let entry = entry?;
-        if entry.file_name().to_string_lossy().starts_with("chords-") && entry.path().is_dir() {
-            paths.push(entry.path());
+    let mut entries = WalkDir::new(root).min_depth(1).into_iter();
+    while let Some(entry) = entries.next() {
+        let entry = entry.with_context(|| format!("Cannot read monorepo {}", root.display()))?;
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy();
+        if name.starts_with('.') || matches!(name.as_ref(), "node_modules" | "target") {
+            entries.skip_current_dir();
+        } else if name.starts_with("chords-") && is_package_root(entry.path()) {
+            paths.push(entry.into_path());
+            // Vendored packages belong to this package, not to the monorepo.
+            entries.skip_current_dir();
         }
     }
     paths.sort();
     Ok(paths)
+}
+
+fn is_package_root(path: &Path) -> bool {
+    path.join("package.json").is_file()
+        || ["chords", "js", "bin"]
+            .iter()
+            .any(|dir| path.join(dir).is_dir())
 }
 
 pub fn validate_monorepo_path(path: &str) -> Result<PathBuf> {
@@ -29,7 +41,7 @@ pub fn validate_monorepo_path(path: &str) -> Result<PathBuf> {
     let root = fs::canonicalize(path.trim()).context("Failed to access monorepo folder")?;
     ensure!(
         !discover_monorepo_packages(&root)?.is_empty(),
-        "No chord packages found. Expected folders under packages/chords-* in {}",
+        "No chord packages found. Expected chords-* folders at the root or nested within {}",
         root.display()
     );
     // Detect unreadable packages and duplicate names before saving the source.
@@ -38,15 +50,18 @@ pub fn validate_monorepo_path(path: &str) -> Result<PathBuf> {
 }
 
 pub fn import_monorepo_packages(root: &Path) -> Result<HashMap<String, RawChordPackage>> {
-    let mut packages = HashMap::new();
+    let mut packages: HashMap<String, RawChordPackage> = HashMap::new();
     for path in discover_monorepo_packages(root)? {
         let package = LocalPackageRegistry::import_from_local_folder(&path)?;
         let name = package.package_name();
-        ensure!(
-            !packages.contains_key(&name),
-            "Duplicate package {name} in monorepo {}",
-            root.display()
-        );
+        if let Some(existing) = packages.get(&name) {
+            anyhow::bail!(
+                "Duplicate package {name} in monorepo {}: {} and {}",
+                root.display(),
+                existing.root.display(),
+                path.display()
+            );
+        }
         packages.insert(name, package);
     }
     Ok(packages)
@@ -74,11 +89,11 @@ mod tests {
         fn new() -> Self {
             let root =
                 std::env::temp_dir().join(format!("chord-monorepo-{}", uuid::Uuid::new_v4()));
-            fs::create_dir_all(root.join("packages")).unwrap();
+            fs::create_dir_all(&root).unwrap();
             Self(root)
         }
         fn package(&self, folder: &str, name: &str) -> PathBuf {
-            let path = self.0.join("packages").join(folder);
+            let path = self.0.join(folder);
             fs::create_dir_all(path.join("chords")).unwrap();
             fs::write(
                 path.join("package.json"),
@@ -95,21 +110,83 @@ mod tests {
     }
 
     #[test]
-    fn monorepo_discovers_only_immediate_matching_directories() {
+    fn monorepo_discovers_matching_directories_at_the_root_and_nested() {
         let fixture = Fixture::new();
         let first = fixture.package("chords-a", "@test/a");
         let last = fixture.package("chords-z", "@test/z");
         fixture.package("utility", "@test/ignored");
-        fixture.package("group/chords-nested", "@test/nested");
-        fs::write(fixture.0.join("packages/chords-file"), "not a folder").unwrap();
+        let nested = fixture.package("group/deeper/chords-nested", "@test/nested");
+        let legacy = fixture.package("packages/chords-legacy", "@test/legacy");
+        fs::write(fixture.0.join("chords-file"), "not a folder").unwrap();
         assert_eq!(
             discover_monorepo_packages(&fixture.0).unwrap(),
-            vec![first.clone(), last]
+            vec![first.clone(), last, nested, legacy]
         );
         let packages = import_monorepo_packages(&fixture.0).unwrap();
-        assert_eq!(packages.len(), 2);
+        assert_eq!(packages.len(), 4);
         assert_eq!(packages["@test/a"].root, first);
         assert!(validate_monorepo_path(fixture.0.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn monorepo_ignores_vendored_packages_dependencies_and_build_outputs() {
+        let fixture = Fixture::new();
+        let package = fixture.package("chords-one", "@test/one");
+        for folder in [
+            "chords-one/chords/@test/chords-vendored",
+            "node_modules/@test/chords-dependency",
+            "group/node_modules/chords-dependency",
+            "target/chords-build",
+            ".git/chords-metadata",
+            ".jj/chords-metadata",
+            ".moon/cache/states/chords-one",
+            "group/.build/checkouts/chords-one",
+            ".chord-native-build/chords-one",
+        ] {
+            fixture.package(folder, "@test/one");
+        }
+        assert_eq!(
+            discover_monorepo_packages(&fixture.0).unwrap(),
+            vec![package]
+        );
+        assert_eq!(import_monorepo_packages(&fixture.0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn monorepo_ignores_leftover_folders_after_packages_move() {
+        let fixture = Fixture::new();
+        let package = fixture.package("@test/chords-one", "@test/one");
+        fs::create_dir_all(fixture.0.join("packages/chords-one/.build/index-build")).unwrap();
+        fs::create_dir_all(fixture.0.join("chords-empty")).unwrap();
+        fs::create_dir_all(fixture.0.join(".moon/cache/states/chords-one")).unwrap();
+        assert_eq!(
+            discover_monorepo_packages(&fixture.0).unwrap(),
+            vec![package.clone()]
+        );
+        let packages = import_monorepo_packages(&fixture.0).unwrap();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages["@test/one"].root, package);
+        assert!(validate_monorepo_path(fixture.0.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn monorepo_supports_manifest_only_and_manifestless_packages() {
+        let fixture = Fixture::new();
+        let manifest = fixture.package("chords-manifest", "@test/manifest");
+        fs::remove_dir(manifest.join("chords")).unwrap();
+        for dir in ["chords", "js", "bin"] {
+            fs::create_dir_all(fixture.0.join(format!("chords-{dir}/{dir}"))).unwrap();
+        }
+        // A matching container without package contents must not hide nested packages.
+        let nested = fixture.package("chords-container/group/chords-nested", "@test/nested");
+        let packages = import_monorepo_packages(&fixture.0).unwrap();
+        assert_eq!(packages.len(), 5);
+        assert_eq!(packages["@test/manifest"].root, manifest);
+        assert_eq!(packages["@test/nested"].root, nested);
+        for dir in ["chords", "js", "bin"] {
+            let name = format!("chords-{dir}");
+            assert_eq!(packages[&name].root, fixture.0.join(&name));
+        }
     }
 
     #[test]
@@ -183,7 +260,7 @@ mod tests {
                 .to_string()
                 .contains("Duplicate package")
         );
-        fs::remove_dir_all(fixture.0.join("packages")).unwrap();
+        fs::remove_dir_all(&fixture.0).unwrap();
         assert!(discover_monorepo_packages(&fixture.0).is_err());
     }
 }

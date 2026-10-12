@@ -3,7 +3,7 @@ use crate::app::chord_package_manager::chord_package_registry::ChordPackageRegis
 use crate::app::chord_package_manager::{ChordJsPackage, ChordPackage, ChordReference};
 use crate::app::state::AppSingleton;
 use crate::models::{
-    ChordInput, ChordInputEvent, ChordsFileImportOverride, CompiledChordsFile,
+    ChordEventTrigger, ChordInput, ChordInputEvent, ChordsFileImportOverride, CompiledChordsFile,
     CompiledChordsFileHandler, FilePathslug, ParsedChordsFile, RawChordPackage, RawChordsFile,
 };
 use crate::state::{
@@ -331,7 +331,7 @@ impl ChordPackageManager {
                 }
                 Err(e) => {
                     log::error!(
-                        "skipping chords file {:?} in {} because of compilation error: {:?}",
+                        "skipping chords file {:?} in {} because of compilation error: {:#}",
                         pathslug,
                         name,
                         e
@@ -486,7 +486,10 @@ impl ChordPackageManager {
                     if chords_file
                         .chords
                         .iter()
-                        .find(|c| c.trigger.matches(&event.input))
+                        .find(|c| {
+                            c.trigger.matches(&event.input)
+                                && c.actions.iter().any(|a| a.trigger() == ChordEventTrigger::Input)
+                        })
                         .is_some()
                     {
                         return Some(package.clone());
@@ -499,7 +502,10 @@ impl ChordPackageManager {
             if package
                 .global_chords
                 .iter()
-                .find(|c| c.chord.trigger.matches(&event.input))
+                .find(|c| {
+                    c.chord.trigger.matches(&event.input)
+                        && c.chord.actions.iter().any(|a| a.trigger() == ChordEventTrigger::Input)
+                })
                 .is_some()
             {
                 return Some(package.clone());
@@ -507,6 +513,37 @@ impl ChordPackageManager {
         }
 
         None
+    }
+
+    /// Lifecycle events visit all matching chords, in app/global and package priority order.
+    pub fn matching_chord_contexts(
+        &self,
+        event: &ChordInputEvent,
+    ) -> Vec<(ChordPackage, ChordReference)> {
+        let packages = self.packages.read();
+        let mut contexts = Vec::new();
+        let mut seen = HashSet::new();
+        for app_chords in [true, false] {
+            for package in packages.values() {
+                let matches = if app_chords {
+                    package.matching_app_chords(event)
+                } else {
+                    package.matching_global_chords(event)
+                };
+                for reference in matches {
+                    let identity = (
+                        reference.package_name.clone(),
+                        reference.chords_file_pathslug.clone(),
+                        reference.chord.index,
+                        reference.chord.raw_trigger.clone(),
+                    );
+                    if seen.insert(identity) {
+                        contexts.push((package.clone(), reference));
+                    }
+                }
+            }
+        }
+        contexts
     }
 }
 

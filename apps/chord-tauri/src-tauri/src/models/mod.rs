@@ -7,6 +7,8 @@ mod chord_trigger;
 pub use chord_trigger::*;
 mod chord_action;
 pub use chord_action::*;
+mod chord_keyboard_event;
+pub use chord_keyboard_event::*;
 mod raw_chord_package;
 pub use raw_chord_package::*;
 mod chords_file;

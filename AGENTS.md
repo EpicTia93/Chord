@@ -1,5 +1,9 @@
 # Project: Chord
 
+# Runtime APIs
+
+Prefer Bun APIs over `node:*` in Chord handlers and Bun scripts. Use `Bun.file` / `Bun.write` for file contents and copies, `Bun.spawn` / `Bun.spawnSync` for subprocesses, and Bun's URL helpers. Keep Node APIs for operations without a Bun equivalent or code that must run under Node, including Vite+ configuration and tests. Preserve failure handling, timeouts, permissions, and locking semantics.
+
 # Version control
 
 - This checkout uses Jujutsu (`jj`) with a colocated Git repository. Read [the jujutsu skill](./.agents/skills/jujutsu/SKILL.md) before version-control operations; use `jj` in this checkout.

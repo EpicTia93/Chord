@@ -1,28 +1,28 @@
+use super::chord_sequence::{ChordSequence, ChordSequenceDispatch, ChordTaskQueue};
 use crate::app::AppHandleExt;
-use crate::app::chord_runner::{ChordActionTask, ChordActionTaskRun};
+use crate::app::chord_runner::release_chord_sequences;
 use crate::app::state::AppSingleton;
-use crate::models::{ChordInput, ChordInputEvent, Key, KeyEvent};
-use crate::state::{ChordInputObservable, ChordInputState, ChordPanelState, FrontmostObservable, Observable};
-use anyhow::{Context, Result, bail};
-use device_query::{DeviceQuery, Keycode};
+use crate::models::{ChordEventTrigger, ChordInputEvent, ChordKeyboardEvent, Key, KeyEvent};
+use crate::state::{ChordInputObservable, ChordInputState, Observable};
+use anyhow::{Result, bail};
 use keycode::KeyMappingCode;
 use nject::injectable;
 use parking_lot::Mutex;
 use std::collections::HashSet;
-use std::sync::{Arc, mpsc};
-use std::time::Duration;
-use tauri::{AppHandle, Emitter, Listener};
-use tauri_plugin_user_input::InputEvent;
+use tauri::AppHandle;
+use tokio::sync::oneshot;
 
 #[injectable]
 pub struct ChordInputManager {
     #[inject(Mutex::new(None))]
-    active_task_run: Mutex<Option<ChordActionTaskRun>>,
-
-    /// Prevents double-pressing keys when a key is held for a while
+    active_task_run: Mutex<Option<(ChordInputEvent, oneshot::Sender<()>)>>,
+    /// Repeated keydowns notify handlers without inserting duplicate buffer characters.
     #[inject(Mutex::new(HashSet::new()))]
     held_keys: Mutex<HashSet<Key>>,
-
+    #[inject(Mutex::new(ChordSequence::default()))]
+    sequence: Mutex<ChordSequence>,
+    #[inject(ChordTaskQueue::default())]
+    task_queue: ChordTaskQueue,
     handle: AppHandle,
     observable: ChordInputObservable,
 }
@@ -30,7 +30,8 @@ pub struct ChordInputManager {
 impl ChordInputManager {
     pub fn reset(&self) -> Result<()> {
         self.held_keys.lock().clear();
-        self.spawn_end_active_task()?;
+        self.end_active_task();
+        self.reset_matching_chords()?;
         self.observable.set_state(|_| ChordInputState::default())
     }
 
@@ -40,229 +41,259 @@ impl ChordInputManager {
         if input.len() < 2 {
             bail!("a chord sequence must contain at least two keys");
         }
-
-        self.spawn_end_active_task()?;
-        let task = self
-            .resolve_task_from_keys(&input, 1)?
-            .with_context(|| format!("no chord is configured for `{sequence}`"))?;
-        let event = task.event.clone();
-        self.observable.set_state(move |state| ChordInputState {
-            input: vec![],
-            pressed_input_event: Some(event.clone()),
-            selected_input_event: Some(event),
-            ..state
-        })?;
-
-        let runner = self.handle.app_state().chord_action_task_runner();
-        let task_run = runner.start_task(&task)?;
-        self.spawn_end_task(task_run)
+        self.end_active_task();
+        self.reset_matching_chords()?;
+        let dispatch = self.resolve_dispatch(&input, &[ChordEventTrigger::Input], None)?;
+        let Some(event) = dispatch.input_event.clone() else {
+            self.reset_matching_chords()?;
+            bail!("no chord is configured for `{sequence}`");
+        };
+        self.set_executed_event(event)?;
+        self.run_dispatch(dispatch, false)?;
+        self.reset_matching_chords()
     }
 
-    fn spawn_end_task(&self, task_run: ChordActionTaskRun) -> Result<()> {
+    // Called only while Chord mode is active.
+    pub fn handle_key_event(&self, key_event: &KeyEvent) -> Result<()> {
+        let fresh_press = should_handle_held_key_event(&mut self.held_keys.lock(), key_event);
+        let (KeyEvent::Press(key) | KeyEvent::Release(key)) = key_event;
+        let keyboard = self.handle.app_state().keyboard();
+        let Some(mut device_keys) = keyboard.state().keys() else {
+            return Ok(());
+        };
+        // Account for the event even if the OS key-state query has not caught up yet.
+        match key_event {
+            KeyEvent::Press(_) => {
+                if !device_keys.contains(key) {
+                    device_keys.push(*key);
+                }
+            }
+            KeyEvent::Release(_) => device_keys.retain(|held| held != key),
+        }
+        let event = ChordKeyboardEvent::new(key_event, &device_keys, !fresh_press);
+        let press_triggers = [ChordEventTrigger::Keydown, ChordEventTrigger::Keypress];
+
+        if let KeyEvent::Release(Key(code)) = key_event {
+            let should_end = self
+                .active_task_run
+                .lock()
+                .as_ref()
+                .is_some_and(|(input, _)| {
+                    *code == KeyMappingCode::CapsLock
+                        || input.input.last().is_some_and(|key| key.0 == *code)
+                });
+            if should_end {
+                self.end_active_task();
+            }
+        }
+
+        if !fresh_press {
+            return self.dispatch_current_buffer(&press_triggers, &event);
+        }
+        let is_shift_pressed = event.shift_key;
+        if Self::should_toggle_indicator_for_tab_event(key_event, is_shift_pressed) {
+            if matches!(key_event, KeyEvent::Press(_)) {
+                self.handle
+                    .app_state()
+                    .chord_mode_manager()
+                    .panel
+                    .toggle()?;
+            }
+            return self.dispatch_current_buffer(
+                if matches!(key_event, KeyEvent::Press(_)) {
+                    &press_triggers
+                } else {
+                    &[ChordEventTrigger::Keyup]
+                },
+                &event,
+            );
+        }
+        if Key::modifiers().contains(key)
+            || device_keys
+                .iter()
+                .any(|key| Key::non_shift_modifiers().contains(key))
+        {
+            return self.dispatch_current_buffer(
+                if matches!(key_event, KeyEvent::Press(_)) {
+                    &press_triggers
+                } else {
+                    &[ChordEventTrigger::Keyup]
+                },
+                &event,
+            );
+        }
+
+        match key_event {
+            KeyEvent::Release(Key(code)) => {
+                self.dispatch_current_buffer(&[ChordEventTrigger::Keyup], &event)?;
+                let state = self.observable.get_state()?;
+                if *code == KeyMappingCode::Space
+                    && Self::should_execute_key_buffer_on_release(&state)
+                {
+                    let dispatch = self.resolve_dispatch(
+                        &state.input,
+                        &[ChordEventTrigger::Input],
+                        Some(&event),
+                    )?;
+                    if let Some(input_event) = dispatch.input_event.clone() {
+                        self.set_executed_event(input_event)?;
+                    }
+                    self.run_dispatch(dispatch, false)?;
+                    self.clear_key_buffer()?;
+                }
+            }
+            KeyEvent::Press(Key(KeyMappingCode::CapsLock)) => {
+                let state = self.observable.get_state()?;
+                if state.input.is_empty() {
+                    self.dispatch_current_buffer(&press_triggers, &event)?;
+                    if let Some(selected) = state.selected_input_event {
+                        let dispatch = self.resolve_dispatch(
+                            &selected.input,
+                            &[ChordEventTrigger::Input],
+                            Some(&event),
+                        )?;
+                        self.complete_dispatch(dispatch)?;
+                    }
+                } else {
+                    let dispatch = self.resolve_dispatch(
+                        &state.input,
+                        &[
+                            ChordEventTrigger::Keydown,
+                            ChordEventTrigger::Keypress,
+                            ChordEventTrigger::Input,
+                        ],
+                        Some(&event),
+                    )?;
+                    self.complete_dispatch(dispatch)?;
+                }
+            }
+            KeyEvent::Press(Key(KeyMappingCode::Escape)) => {
+                self.clear_key_buffer()?;
+                self.dispatch_current_buffer(&press_triggers, &event)?;
+            }
+            KeyEvent::Press(Key(KeyMappingCode::Space)) => {
+                self.dispatch_current_buffer(&press_triggers, &event)?;
+            }
+            KeyEvent::Press(key) => {
+                if is_shift_pressed && Self::should_clear_key_buffer_on_shifted_press(key) {
+                    self.clear_key_buffer()?;
+                    self.dispatch_current_buffer(&press_triggers, &event)?;
+                } else if is_shift_pressed && key.to_sequence_char().is_some() {
+                    self.handle_shifted_key_press(key, &event)?;
+                } else {
+                    self.handle_unshifted_key_press(key, &event)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_dispatch(
+        &self,
+        keys: &[Key],
+        triggers: &[ChordEventTrigger],
+        keyboard_event: Option<&ChordKeyboardEvent>,
+    ) -> Result<ChordSequenceDispatch> {
+        let event = ChordInputEvent {
+            input: keys.to_vec(),
+            application_id: self.handle.app_state().frontmost().frontmost()?,
+        };
+        let contexts = self
+            .handle
+            .app_state()
+            .chord_package_manager()
+            .matching_chord_contexts(&event);
+        self.sequence
+            .lock()
+            .dispatch(&event, &contexts, triggers, keyboard_event, 1)
+    }
+
+    fn dispatch_current_buffer(
+        &self,
+        triggers: &[ChordEventTrigger],
+        event: &ChordKeyboardEvent,
+    ) -> Result<()> {
+        let state = self.observable.get_state()?;
+        self.run_dispatch(
+            self.resolve_dispatch(&state.input, triggers, Some(event))?,
+            false,
+        )
+    }
+
+    fn end_active_task(&self) {
+        if let Some((_, release)) = self.active_task_run.lock().take() {
+            let _ = release.send(());
+        }
+    }
+
+    fn run_dispatch(&self, dispatch: ChordSequenceDispatch, hold_input: bool) -> Result<()> {
+        if dispatch.tasks.is_empty() && dispatch.expired.is_empty() {
+            return Ok(());
+        }
+        let release = if let Some(input_event) = dispatch.input_event.clone().filter(|_| hold_input)
+        {
+            self.end_active_task();
+            let (sender, receiver) = oneshot::channel();
+            *self.active_task_run.lock() = Some((input_event, sender));
+            Some(receiver)
+        } else {
+            None
+        };
         let handle = self.handle.clone();
-        tauri::async_runtime::spawn(async move {
-            let chord_action_task_runner = handle.app_state().chord_action_task_runner();
-            if let Err(e) = chord_action_task_runner.end_task(task_run).await {
-                log::error!("error ending task: {:?}", e);
+        self.task_queue.enqueue(async move {
+            let result = async {
+                release_chord_sequences(handle.clone(), dispatch.expired).await?;
+                let runner = handle.app_state().chord_action_task_runner();
+                let mut release = release;
+                let count = dispatch.tasks.len();
+                for (index, task) in dispatch.tasks.into_iter().enumerate() {
+                    let task_run = runner.start_task(&task)?;
+                    if index + 1 == count {
+                        if let Some(release) = release.take() {
+                            let _ = release.await;
+                        }
+                    }
+                    runner.end_task(task_run).await?;
+                }
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                log::error!("error running chord events: {error:#}");
             }
         });
         Ok(())
     }
 
-    // If `handle_key_event` is called, the state is guaranteed to be active
-    pub fn handle_key_event(&self, key_event: &KeyEvent) -> Result<()> {
-        if !self.track_held_key_event(key_event) {
-            log::debug!("Ignoring repeated chord-mode key press: {:?}", key_event);
-            return Ok(());
-        }
+    fn reset_matching_chords(&self) -> Result<()> {
+        let expired = self.sequence.lock().reset();
+        self.run_dispatch(
+            ChordSequenceDispatch {
+                expired,
+                ..Default::default()
+            },
+            false,
+        )
+    }
 
-        let (KeyEvent::Press(key) | KeyEvent::Release(key)) = key_event;
-        if key == &Key(KeyMappingCode::ShiftLeft) || key == &Key(KeyMappingCode::ShiftRight) {
-            return Ok(());
-        }
-
-        let is_shift_pressed = self.handle.app_state().keyboard().state().is_shift_pressed();
-        if Self::should_toggle_indicator_for_tab_event(key_event, is_shift_pressed) {
-            if matches!(key_event, KeyEvent::Press(_)) {
-                let chord_mode_manager = self.handle.app_state().chord_mode_manager();
-                chord_mode_manager.panel.toggle()?;
-            }
-            return Ok(());
-        }
-
-        // Don't handle any modifier key events
-        let modifiers = Key::modifiers();
-        if modifiers.contains(key) {
-            log::debug!("Ignoring modifier key: {:?}", key);
-            return Ok(());
-        }
-
-        let non_shift_modifiers = Key::non_shift_modifiers();
-        let keyboard_state = self.handle.app_state().keyboard().state();
-        let Some(device_keys) = keyboard_state.keys() else {
-            log::debug!("no accessibility permissions");
-            return Ok(());
-        };
-
-        // If any non-Shift modifier keys are held down, do not handle the event, because it's
-        // likely the user just wants to execute a regular shortcut
-        if device_keys
-            .iter()
-            .copied()
-            .any(|key| non_shift_modifiers.contains(&key))
-        {
-            log::debug!(
-                "Ignoring event because the following modifiers were held down: {:?}",
-                device_keys
-            );
-            return Ok(());
-        }
-
-        Ok(match key_event {
-            KeyEvent::Release(Key(code)) => {
-                let state = self.observable.get_state()?;
-
-                if let Some(pressed_input_event) = &state.pressed_input_event {
-                    if code == &KeyMappingCode::CapsLock
-                        || pressed_input_event.input.last().is_some_and(|k| &k.0 == code)
-                    {
-                        self.spawn_end_active_task()?;
-                    }
-                }
-
-                if code == &KeyMappingCode::Space {
-                    if Self::should_execute_key_buffer_on_release(&state) {
-                        if let Some(task) = self.resolve_task_from_keys(&state.input, 1)? {
-                            self.run_task(task)?;
-                            self.spawn_end_active_task()?;
-                        };
-                        self.observable.set_state(|_| ChordInputState::default())?;
-                    }
-                }
-            }
-
-            // If the caps lock key is pressed, it means we should execute (and clear) the chord
-            // currently in `key_buffer`, or if empty, execute the last chord
-            KeyEvent::Press(Key(KeyMappingCode::CapsLock)) => {
-                let state = self.observable.get_state()?;
-                let key_buffer = state.input.clone();
-
-                // An empty `key_buffer` means we should execute the last executed chord
-                if key_buffer.is_empty() {
-                    // If there isn't an active chord, then do nothing
-                    let Some(selected_input_event) = &state.selected_input_event else {
-                        log::debug!("Key buffer is empty and no chord is active");
-                        return Ok(());
-                    };
-                    if let Some(task) = self.resolve_task_from_keys(&selected_input_event.input, 1)? {
-                        self.run_task(task)?;
-                        self.observable.set_state(|state| {
-                            ChordInputState {
-                                input: vec![],
-                                pressed_input_event: state.selected_input_event.clone(),
-                                selected_input_event: state.selected_input_event,
-                                ..state
-                            }
-                        })?;
-                    } else {
-                        // e.g. we ran it on a different app
-                        log::error!("Last chord no longer applies");
-                        self.observable.set_state(|_| ChordInputState::default())?;
-                    }
-                } else {
-                    // A non-empty key_buffer means we should execute the chord.
-                    log::debug!("Executing key_buffer {:?}", key_buffer);
-                    let Some(task) = self.resolve_task_from_keys(&key_buffer, 1)? else {
-                        log::debug!("task not found for key_buffer {:?}", key_buffer);
-                        self.observable.set_state(|_| ChordInputState::default())?;
-                        return Ok(());
-                    };
-                    let event = task.event.clone();
-                    self.observable.set_state(move |prev| {
-                        ChordInputState {
-                            input: vec![],
-                            pressed_input_event: Some(event.clone()),
-                            selected_input_event: Some(event),
-                            ..prev
-                        }
-                    })?;
-
-                    self.run_task(task)?;
-                }
-            }
-            KeyEvent::Press(Key(KeyMappingCode::Escape)) => {
-                self.clear_key_buffer()?;
-            }
-            KeyEvent::Press(key) => {
-                // Ignore space presses
-                if key == &Key(KeyMappingCode::Space) {
-                    return Ok(());
-                }
-
-                let is_shift_pressed = self.handle.app_state().keyboard().state().is_shift_pressed();
-                if is_shift_pressed {
-                    if Self::should_clear_key_buffer_on_shifted_press(key) {
-                        self.clear_key_buffer()?;
-                    } else {
-                        self.handle_shifted_key_press(key)?;
-                    }
-                } else {
-                    self.handle_unshifted_key_press(key)?;
-                }
-            }
+    fn set_executed_event(&self, event: ChordInputEvent) -> Result<()> {
+        self.observable.set_state(move |state| ChordInputState {
+            input: vec![],
+            pressed_input_event: Some(event.clone()),
+            selected_input_event: Some(event),
+            ..state
         })
     }
 
-    fn track_held_key_event(&self, key_event: &KeyEvent) -> bool {
-        let mut held_keys = self.held_keys.lock();
-        should_handle_held_key_event(&mut held_keys, key_event)
-    }
-
-    fn resolve_task_from_keys(
-        &self,
-        keys: &[Key],
-        num_times: u32,
-    ) -> Result<Option<ChordActionTask>> {
-        let frontmost = self.handle.app_state().frontmost();
-        let application_id = frontmost.frontmost()?;
-        let chord_package_manager = self.handle.app_state().chord_package_manager();
-        let event = ChordInputEvent {
-            input: keys.to_vec(),
-            application_id,
-        };
-        let Some(chord_package) = chord_package_manager.create_event_context(&event) else {
-            log::debug!("package for input {:?} not found", event);
-            return Ok(None);
-        };
-        log::debug!("found package {} for input {:?}", chord_package.name, event);
-        let Some(chord_ref) = chord_package.resolve_chord_from_input_event(&event) else {
-            log::debug!(
-                "couldn't resolve chord in package {} for input {:?}",
-                chord_package.name,
-                event
-            );
-            return Ok(None);
-        };
-        log::debug!("resolved chord: {:?}", chord_ref);
-        let task = chord_package.resolve_task(event, chord_ref, num_times)?;
-        log::debug!("resolved task: {:?}", task);
-        Ok(task)
-    }
-
-    fn spawn_end_active_task(&self) -> Result<()> {
-        let mut guard = self.active_task_run.lock();
-        if let Some(active_task_run) = std::mem::take(&mut *guard) {
-            self.spawn_end_task(active_task_run)?;
+    fn complete_dispatch(&self, dispatch: ChordSequenceDispatch) -> Result<()> {
+        if let Some(event) = dispatch.input_event.clone() {
+            self.set_executed_event(event)?;
+            self.run_dispatch(dispatch, true)?;
+            self.reset_matching_chords()
+        } else {
+            self.run_dispatch(dispatch, false)?;
+            self.clear_key_buffer()
         }
-        Ok(())
-    }
-
-    fn run_task(&self, task: ChordActionTask) -> Result<()> {
-        let runner = self.handle.app_state().chord_action_task_runner();
-        let task_run = runner.start_task(&task)?;
-        let mut lock = self.active_task_run.lock();
-        *lock = Some(task_run);
-        Ok(())
     }
 
     fn should_execute_key_buffer_on_release(state: &ChordInputState) -> bool {
@@ -278,79 +309,78 @@ impl ChordInputManager {
 
     fn next_key_buffer_for_unshifted_press(key_buffer: &[Key], key: &Key) -> Vec<Key> {
         let mut next_key_buffer = key_buffer.to_vec();
-        if key == &Key(KeyMappingCode::Backspace) {
+        if key.0 == KeyMappingCode::Backspace {
             next_key_buffer.pop();
-        } else {
+        } else if key.to_sequence_char().is_some() {
             next_key_buffer.push(*key);
         }
         next_key_buffer
     }
 
-    // If an unshifted key is pressed, we update the key buffer, which always clears
-    // our `active_chord`
-    fn handle_unshifted_key_press(&self, key: &Key) -> Result<()> {
+    fn handle_unshifted_key_press(&self, key: &Key, event: &ChordKeyboardEvent) -> Result<()> {
         let state = self.observable.get_state()?;
         let next_key_buffer = Self::next_key_buffer_for_unshifted_press(&state.input, key);
-        log::debug!("New key buffer: {:?}", next_key_buffer);
-        self.observable
-            .set_state(|state| ChordInputState { input: next_key_buffer, selected_input_event: None, pressed_input_event: None, ..state})?;
-        Ok(())
+        self.observable.set_state(|state| ChordInputState {
+            input: next_key_buffer,
+            selected_input_event: None,
+            pressed_input_event: None,
+            ..state
+        })?;
+        self.dispatch_current_buffer(
+            &[ChordEventTrigger::Keydown, ChordEventTrigger::Keypress],
+            event,
+        )
     }
 
     fn should_clear_key_buffer_on_shifted_press(key: &Key) -> bool {
-        key == &Key(KeyMappingCode::Backspace)
+        key.0 == KeyMappingCode::Backspace
     }
 
     fn clear_key_buffer(&self) -> Result<()> {
-        self.observable
-            .set_state(|state| ChordInputState { input: vec![], selected_input_event: None, pressed_input_event: None, ..state})?;
-        Ok(())
+        self.end_active_task();
+        self.observable.set_state(|state| ChordInputState {
+            input: vec![],
+            selected_input_event: None,
+            pressed_input_event: None,
+            ..state
+        })?;
+        self.reset_matching_chords()
     }
 
-    // If shift is pressed, it means the user is trying to execute a chord.
-    // If a chord is executed, we always reset `key_buffer`.
-    fn handle_shifted_key_press(&self, key: &Key) -> Result<()> {
+    fn handle_shifted_key_press(&self, key: &Key, event: &ChordKeyboardEvent) -> Result<()> {
         let state = self.observable.get_state()?;
-        let key_buffer = state.input.clone();
-
-        let sequence = {
-            // If key_buffer is empty (i.e. we just activated a chord), we should use that chord to
-            // determine our sequence
-            if key_buffer.is_empty() {
-                let Some(selected_input_event) = &state.selected_input_event else {
-                    // If `key_buffer` and `active_chord` is empty, then we do nothing
-                    log::error!("No chord active");
-                    return Ok(());
-                };
-
-                let mut new_chord = selected_input_event.input.clone();
-                new_chord.pop();
-                new_chord.push(key.clone());
-                new_chord
-            }
-            // If `key_buffer` is non-empty, we should run the chord `key_buffer` + key
-            else {
-                let mut sequence = key_buffer.clone();
-                sequence.push(key.clone());
-                sequence
-            }
-        };
-
-        let Some(task) = self.resolve_task_from_keys(&sequence, 1)? else {
-            log::debug!("Invalid sequence {:?}", sequence);
-            return Ok(());
-        };
-
-        let event = task.event.clone();
-        self.observable.set_state(move |state| ChordInputState {
-            input: vec![],
-            pressed_input_event: Some(event.clone()),
-            selected_input_event: Some(event),
-            ..state
-        });
-        self.run_task(task)?;
-
-        Ok(())
+        let mut sequence = state.input;
+        if sequence.is_empty() {
+            let Some(selected) = state.selected_input_event else {
+                return self.dispatch_current_buffer(
+                    &[ChordEventTrigger::Keydown, ChordEventTrigger::Keypress],
+                    event,
+                );
+            };
+            sequence = selected.input;
+            sequence.pop();
+        }
+        sequence.push(*key);
+        let dispatch = self.resolve_dispatch(
+            &sequence,
+            &[
+                ChordEventTrigger::Keydown,
+                ChordEventTrigger::Keypress,
+                ChordEventTrigger::Input,
+            ],
+            Some(event),
+        )?;
+        if dispatch.input_event.is_some() {
+            self.complete_dispatch(dispatch)
+        } else {
+            self.observable.set_state(|state| ChordInputState {
+                input: sequence,
+                selected_input_event: None,
+                pressed_input_event: None,
+                ..state
+            })?;
+            self.run_dispatch(dispatch, false)
+        }
     }
 }
 
@@ -361,5 +391,61 @@ fn should_handle_held_key_event(held_keys: &mut HashSet<Key>, key_event: &KeyEve
             held_keys.remove(key);
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backspace_edits_the_buffer_and_non_text_keys_preserve_it() {
+        let buffer = Key::parse_sequence("j,a").unwrap();
+        assert_eq!(
+            ChordInputManager::next_key_buffer_for_unshifted_press(
+                &buffer,
+                &Key(KeyMappingCode::Backspace)
+            ),
+            Key::parse_sequence("j,").unwrap()
+        );
+        for key in [
+            KeyMappingCode::ArrowLeft,
+            KeyMappingCode::Enter,
+            KeyMappingCode::ShiftLeft,
+        ] {
+            assert_eq!(
+                ChordInputManager::next_key_buffer_for_unshifted_press(&buffer, &Key(key)),
+                buffer
+            );
+        }
+        assert!(
+            ChordInputManager::next_key_buffer_for_unshifted_press(
+                &[],
+                &Key(KeyMappingCode::Backspace)
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn key_repeat_is_observed_without_reinserting_the_character() {
+        let mut held = HashSet::new();
+        let key = Key(KeyMappingCode::KeyJ);
+        assert!(should_handle_held_key_event(
+            &mut held,
+            &KeyEvent::Press(key)
+        ));
+        assert!(!should_handle_held_key_event(
+            &mut held,
+            &KeyEvent::Press(key)
+        ));
+        assert!(should_handle_held_key_event(
+            &mut held,
+            &KeyEvent::Release(key)
+        ));
+        assert!(should_handle_held_key_event(
+            &mut held,
+            &KeyEvent::Press(key)
+        ));
     }
 }
