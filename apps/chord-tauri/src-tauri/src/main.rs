@@ -49,6 +49,9 @@ enum Commands {
         #[arg(value_name = "ENCODED_ARG", allow_hyphen_values = true, num_args = 1..)]
         encoded_args: Vec<String>,
     },
+    /// Internal crash-isolated package runtime.
+    #[command(name = "__package-worker", hide = true)]
+    PackageWorker { address: String, token: String },
     /// Internal detached app launch used for chord execution.
     #[command(name = "__app-chord", hide = true)]
     AppChord {
@@ -98,6 +101,11 @@ fn main() {
     }
 
     match cli.command {
+        Some(Commands::PackageWorker { address, token }) => {
+            exit_on_error(cli_worker::run_package(move || async move {
+                chords_lib::run_package_worker(address, token).await
+            }));
+        }
         Some(Commands::Bun { script, args }) => {
             if let Err(error) = run_cli(script, args) {
                 eprintln!("{error:#}");

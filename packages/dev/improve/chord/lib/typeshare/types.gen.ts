@@ -230,6 +230,8 @@ export interface HandlerChordAction {
 	/** Key in the JS engine's `__RUST_HANDLER_REGISTRY`. */
 	handlerId: string;
 	eventArgs: any[];
+	/** Entered chord sequence, available as `this.input` in the handler. */
+	input?: string;
 	/** Persistent JavaScript values for this chord's current matching interval. */
 	sequenceId?: string;
 	assignTo?: string;

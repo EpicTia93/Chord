@@ -2,7 +2,7 @@ use crate::app::chord_package_manager::ChordJsPackage;
 use crate::app::chord_runner::ChordActionTask;
 use crate::models::{
     Chord, ChordAction, ChordEventTrigger, ChordInput, ChordInputEvent, ChordKeyboardEvent,
-    ChordTaskAction, ChordTrigger, CompiledChordsFile, FilePathslug, HandlerChordAction,
+    ChordTaskAction, ChordTrigger, CompiledChordsFile, FilePathslug, HandlerChordAction, Key,
     RawChordsFile,
 };
 use anyhow::{Context, Result};
@@ -169,6 +169,7 @@ impl ChordPackage {
                 };
 
                 if let Some(handler) = handler {
+                    let input = Key::serialize_sequence(&event.input).unwrap_or_default();
                     Some(ChordActionTask {
                         package_name: chord_reference.package_name.clone(),
                         event,
@@ -176,6 +177,7 @@ impl ChordPackage {
                         action: ChordTaskAction::Handler(HandlerChordAction {
                             handler_id: handler.handler_id.clone(),
                             event_args,
+                            input,
                             sequence_id,
                             assign_to: emit.assign_to.clone(),
                             keyboard_event,

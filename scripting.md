@@ -21,13 +21,17 @@ file = "prepare.js"
 [on.update]
 file = "update.js"
 
-[chords.'^j,(.*)$']
+[chords.'j,(.*)']
 name = "Live clicks"
 '@init:prepare=context' = []
 '@keydown:update=latest' = ['$context', '$1']
 ```
 
 The event name refers to an entry in `[on]`. Every event specifier accepts an argument array and may assign a return value. Identifiers contain ASCII letters, digits, or underscores and start with a letter or underscore. An exact argument such as `$context` passes the stored JavaScript value; `$1`, `$2`, etc. continue to pass regex captures. Named references also work inside argument arrays and tables. Referencing an identifier before it has been assigned raises a `ReferenceError`.
+
+Chord keys are literal except for parenthesized regex sections. For example, `hs.(\d+)` matches `hs.12` and captures `12` as `$1`; the dot outside parentheses needs no backslash. Regex syntax, including escaped dots, nested groups, alternatives, and quantifiers, belongs inside the parentheses. Patterns match the entire entered sequence automatically, so no outer `^` or `$` is needed. The same rule applies to regex help hints; compact help ranges retain their special display behavior.
+
+Handlers receive the entered sequence as `this.input` (for example, `hsr12`), alongside `this.focusedAppId` and `this.event`. This also works for CLI execution.
 
 | Trigger | When it calls the handler |
 | --- | --- |
@@ -250,7 +254,7 @@ my-package/
             └── libNodeAPI.dylib   # shared NodeSwift runtime, found through @loader_path
 ```
 
-`src/` is authored source, `chords/` is Chord configuration, `js/` holds portable JavaScript artifacts, and `target/<triple>/` holds native artifacts. Make sure your `.gitignore` ignores `.chord-native-build/` but does not ignore `target/`.
+`src/` is authored source, `chords/` is Chord configuration, `js/` holds portable JavaScript artifacts, and `target/<triple>/` holds native artifacts. Native build state lives in `node_modules/.cache/chord/native/`, covered by the usual `node_modules/` ignore. Keep `target/` tracked.
 
 ## Writing one
 
@@ -296,10 +300,11 @@ export default function build(times = 1) {
 ```
 
 - `import.meta.chord.resolveNative("beep")` returns the absolute path of `target/<Chord's triple>/beep/beep.node` for the calling module's package, including when the package is vendored inside another one. `import.meta.chord.resolvePackageFile("any/relative/path")` does the same for arbitrary package files. Both are bound to the module they are read from, so a module can only resolve paths within its own package.
-- Handlers run on Chord's JavaScript worker thread. On macOS, both the desktop app and the `bun` / `run` CLI commands service the main run loop, so native add-ons can use Swift's `@MainActor`. Export an async NodeSwift function and use `try await MainActor.run { ... }` for main-thread operations. NodeSwift returns a JavaScript Promise; return or await that Promise from your handler so Chord waits for completion and reports errors. Keep NodeAPI values on `@NodeActor`, passing Swift values across to `@MainActor`. The CLI services main-thread work without creating the desktop UI; app-only `chord` APIs still require the app.
-- A thrown Swift error is reported as a JavaScript handler error. A crash in native code (`fatalError`, a bad pointer, `exit()`) takes Chord down with it—there is no separate process—so keep the exported surface small and validate inputs.
-- Once opened, an add-on stays loaded until Chord quits; reloading packages picks up changed JavaScript, but a rebuilt `.node` file needs a restart.
-- `print` output goes to Chord's stdout.
+- Each installed package runs in its own supervised process with a persistent embedded Bun VM. Imports, handler factories, lifecycle callbacks, timers, and native add-ons all stay in that process. On macOS the worker services AppKit events and Swift's `@MainActor`; keep NodeAPI values on `@NodeActor` and pass Swift values to the main actor. Return or await native Promises so Chord waits for completion and reports errors.
+- JavaScript and Swift exceptions are reported as handler errors. A native abort, bad pointer, or `process.exit()` terminates only the package worker. Chord disables that worker until configuration reload, leaves other packages running, and never replays the failed action. Setup and health checks have a 15-second deadline; actions and lifecycle callbacks have a five-minute deadline for interactive UI.
+- Reloading configuration replaces package workers, so rebuilt JavaScript, transitive imports, and native add-ons are loaded into fresh VMs. Return-value assignments preserve JavaScript object identity inside the package's VM between events in the same matching interval.
+- Workers retain the user's filesystem and process access; this is crash isolation, not a permissions sandbox.
+- Package stdout and stderr inherit Chord's log streams.
 
 ## Declaring it
 
@@ -343,7 +348,7 @@ export default config({
 });
 ```
 
-The generated SwiftPM package and NodeSwift dependency build are shared across the workspace under `.chord-native-build/`; each package still gets an independent content cache and committed output. `@keychord/config` currently supports Apple triples.
+`@keychord/config` builds the package's root `Package.swift` directly. SwiftPM build products and staging files live in each package's `node_modules/.cache/chord/native/`, grouped by target triple and add-on; distributable files are copied to `target/`. `@keychord/config` currently supports Apple triples.
 
 Any other build system works too: Chord only cares that `target/<triple>/<path>/<name>.node` is a Node-API add-on compatible with Bun's `process.dlopen` and that its dynamic dependencies are resolvable. For the standard NodeSwift build, `libNodeAPI.dylib` sits beside the add-on and is found through `@loader_path`.
 
@@ -360,7 +365,7 @@ chord bun scripts/run.ts by-letters f     # from the chords-menu checkout
 - `process.dlopen` failures name the missing file or Node-API registration problem; check that the add-on and `libNodeAPI.dylib` under `target/<your triple>/` were built and committed and that the `#NodeModule` export names match the TypeScript binding.
 - Node-API add-ons run in Chord's embedded Bun runtime; check that the add-on targets Bun's supported Node-API surface.
 - Accessibility calls inherit Chord's Accessibility permission—grant it to Chord.
-- Native crashes crash Chord: run the handler from the CLI first while developing.
+- A native crash disables that package worker until configuration reload. Run the handler from the CLI while developing to inspect its diagnostics.
 
 ## FAQ
 

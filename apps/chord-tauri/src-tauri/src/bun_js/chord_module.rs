@@ -4,9 +4,8 @@ use crate::app::AppHandleExt;
 use crate::app::chord_package_manager::resolve_logical_package_path;
 use crate::app::global_hotkey_store::GlobalHotkeyStoreEntry;
 use crate::bun_js::AppUserData;
-use crate::bun_js::lifecycle::{
-    init_app_lifecycle, register_app_launch_handler, register_app_terminate_handler,
-};
+use crate::bun_js::lifecycle::{register_app_launch_handler, register_app_terminate_handler};
+use crate::bun_js::protocol::HostRequest;
 use crate::constants::GLOBAL_HOTKEYS_POOL;
 use crate::models::{ShortcutChordAction, SimulatedShortcut, native_module_relpath};
 #[cfg(target_os = "macos")]
@@ -169,15 +168,131 @@ fn serialize_jxa_args<'js>(ctx: &Ctx<'js>, args: Vec<Value<'js>>) -> rbun::Resul
         .ok_or_else(|| Exception::throw_message(ctx, "failed to serialize JXA arguments"))
 }
 
-fn app_handle(ctx: &Ctx<'_>) -> rbun::Result<tauri::AppHandle> {
-    let userdata = ctx
+fn require_app_context(ctx: &Ctx<'_>) -> rbun::Result<()> {
+    if ctx
         .userdata::<AppUserData>()
-        .ok_or_else(|| Exception::throw_message(ctx, "missing app context"))?;
+        .is_some_and(|data| data.package.is_some())
+    {
+        Ok(())
+    } else {
+        Err(Exception::throw_message(
+            ctx,
+            "Chord host APIs are unavailable in CLI mode",
+        ))
+    }
+}
 
-    userdata
-        .handle
-        .clone()
-        .ok_or_else(|| Exception::throw_message(ctx, "`chord` module is unavailable in CLI mode"))
+fn host_call(ctx: &Ctx<'_>, request: HostRequest) -> rbun::Result<serde_json::Value> {
+    let remote = ctx
+        .userdata::<AppUserData>()
+        .and_then(|data| data.package.as_ref().map(|package| package.host.clone()))
+        .ok_or_else(|| {
+            Exception::throw_message(ctx, "Chord host APIs are unavailable in CLI mode")
+        })?;
+    remote
+        .call(request)
+        .or_throw_msg(ctx, "Chord host request failed")
+}
+
+/// The parent's narrow state/input bridge; no package function or native module executes here.
+pub(crate) fn handle_host_request(
+    handle: &tauri::AppHandle,
+    request: HostRequest,
+    pressed: &mut HashSet<String>,
+) -> anyhow::Result<serde_json::Value> {
+    use serde_json::Value as Json;
+    // Workers can now call these APIs concurrently; allocation and storage must stay atomic.
+    static HOST_REQUEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    let _host_guard = HOST_REQUEST_LOCK.lock();
+    let input = match &request {
+        HostRequest::Press(key) => Some((key, true, false)),
+        HostRequest::Release(key) => Some((key, false, true)),
+        HostRequest::Tap(key) => Some((key, true, true)),
+        _ => None,
+    };
+    if let Some((key, down, up)) = input {
+        let shortcut = key.parse::<SimulatedShortcut>()?;
+        let state = handle.app_state();
+        let runner = state.chord_action_task_runner();
+        let action = ShortcutChordAction {
+            simulated_shortcut: shortcut,
+        };
+        if down {
+            pressed.insert(key.clone());
+            runner.shortcut.simulate_shortcut_actions(
+                runner
+                    .shortcut
+                    .get_start_simulated_shortcut_actions(&action, 1),
+            )?;
+        }
+        if up {
+            runner.shortcut.simulate_shortcut_actions(
+                runner.shortcut.get_end_simulated_shortcut_actions(&action),
+            )?;
+            pressed.remove(key);
+        }
+        return Ok(Json::Null);
+    }
+    match request {
+        HostRequest::Press(key) | HostRequest::Tap(key) | HostRequest::Release(key) => {
+            anyhow::bail!("unhandled input operation: {key}")
+        }
+        HostRequest::GetGlobalHotkey {
+            bundle_id,
+            hotkey_id,
+        } => {
+            let shortcut = handle
+                .app_state()
+                .global_hotkey_store()
+                .entries()?
+                .into_iter()
+                .find_map(|(shortcut, entry)| {
+                    (entry.bundle_id == bundle_id && entry.hotkey_id == hotkey_id)
+                        .then_some(shortcut)
+                });
+            Ok(serde_json::to_value(shortcut)?)
+        }
+        HostRequest::RegisterGlobalHotkey {
+            bundle_id,
+            hotkey_id,
+        } => {
+            let state = handle.app_state();
+            let store = state.global_hotkey_store();
+            let all = store.entries()?;
+            if let Some(shortcut) = all.iter().find_map(|(shortcut, entry)| {
+                (entry.bundle_id == bundle_id && entry.hotkey_id == hotkey_id)
+                    .then_some(shortcut.clone())
+            }) {
+                return Ok(Json::String(shortcut));
+            }
+            let used: HashSet<_> = all.into_keys().collect();
+            let Some(shortcut) = GLOBAL_HOTKEYS_POOL
+                .iter()
+                .map(|shortcut| shortcut.serialize())
+                .find(|shortcut| !used.contains(shortcut))
+            else {
+                return Ok(Json::Null);
+            };
+            store.set(
+                &shortcut,
+                GlobalHotkeyStoreEntry {
+                    bundle_id,
+                    hotkey_id,
+                },
+            )?;
+            Ok(Json::String(shortcut))
+        }
+        HostRequest::SetAppNeedsRelaunch {
+            bundle_id,
+            needs_relaunch,
+        } => {
+            handle
+                .app_state()
+                .desktop_app_manager()
+                .set_app_needs_relaunch(&bundle_id, needs_relaunch)?;
+            Ok(Json::Null)
+        }
+    }
 }
 
 fn on_app_launch<'js>(
@@ -185,7 +300,7 @@ fn on_app_launch<'js>(
     bundle_id: String,
     callback: Function<'js>,
 ) -> rbun::Result<()> {
-    let _ = app_handle(&ctx)?;
+    require_app_context(&ctx)?;
     register_app_launch_handler(ctx, bundle_id, callback)
 }
 
@@ -194,49 +309,20 @@ fn on_app_terminate<'js>(
     bundle_id: String,
     callback: Function<'js>,
 ) -> rbun::Result<Function<'js>> {
-    let _ = app_handle(&ctx)?;
+    require_app_context(&ctx)?;
     register_app_terminate_handler(ctx, bundle_id, callback)
 }
 
 fn press(ctx: Ctx, key: String) -> rbun::Result<()> {
-    let handle = app_handle(&ctx)?;
-    let runner = handle.app_state().chord_action_task_runner();
-    let simulated_shortcut = key
-        .parse::<SimulatedShortcut>()
-        .or_throw_msg(&ctx, &format!("Invalid shortcut {}", key))?;
-    runner
-        .shortcut
-        .simulate_shortcut_actions(
-            runner.shortcut.get_start_simulated_shortcut_actions(
-                &ShortcutChordAction { simulated_shortcut },
-                1,
-            ),
-        )
-        .or_throw_msg(&ctx, "failed to press shortcut")?;
-    Ok(())
+    host_call(&ctx, HostRequest::Press(key)).map(|_| ())
 }
 
 fn release(ctx: Ctx, key: String) -> rbun::Result<()> {
-    let handle = app_handle(&ctx)?;
-    let runner = handle.app_state().chord_action_task_runner();
-    let simulated_shortcut = key
-        .parse::<SimulatedShortcut>()
-        .or_throw_msg(&ctx, &format!("Invalid shortcut {}", key))?;
-    runner
-        .shortcut
-        .simulate_shortcut_actions(
-            runner
-                .shortcut
-                .get_end_simulated_shortcut_actions(&ShortcutChordAction { simulated_shortcut }),
-        )
-        .or_throw_msg(&ctx, "failed to release shortcut")?;
-    Ok(())
+    host_call(&ctx, HostRequest::Release(key)).map(|_| ())
 }
 
 fn tap(ctx: Ctx, key: String) -> rbun::Result<()> {
-    press(ctx.clone(), key.clone())?;
-    release(ctx.clone(), key)?;
-    Ok(())
+    host_call(&ctx, HostRequest::Tap(key)).map(|_| ())
 }
 
 fn get_global_hotkey(
@@ -244,17 +330,14 @@ fn get_global_hotkey(
     bundle_id: String,
     hotkey_id: String,
 ) -> rbun::Result<Option<String>> {
-    let handle = app_handle(&ctx)?;
-    let global_hotkey_store = handle.app_state().global_hotkey_store();
-    let shortcut = global_hotkey_store
-        .entries()
-        .or_throw_msg(&ctx, "bad entries")?
-        .into_iter()
-        .find_map(|(shortcut, entry)| {
-            (entry.bundle_id == bundle_id && entry.hotkey_id == hotkey_id).then_some(shortcut)
-        });
-
-    Ok(shortcut)
+    let value = host_call(
+        &ctx,
+        HostRequest::GetGlobalHotkey {
+            bundle_id,
+            hotkey_id,
+        },
+    )?;
+    serde_json::from_value(value).or_throw_msg(&ctx, "invalid hotkey response")
 }
 
 fn register_global_hotkey(
@@ -262,51 +345,25 @@ fn register_global_hotkey(
     bundle_id: String,
     hotkey_id: String,
 ) -> rbun::Result<Option<String>> {
-    let handle = app_handle(&ctx)?;
-    let global_hotkey_store = handle.app_state().global_hotkey_store();
-    let all = global_hotkey_store
-        .entries()
-        .or_throw_msg(&ctx, "bad store")?;
-
-    // idempotent: if this hotkey is already registered, return the existing shortcut
-    if let Some(existing) = all.iter().find_map(|(shortcut, entry)| {
-        (entry.bundle_id == bundle_id && entry.hotkey_id == hotkey_id).then_some(shortcut.clone())
-    }) {
-        return Ok(Some(existing));
-    }
-
-    let used: HashSet<String> = all.into_keys().collect();
-
-    let Some(next) = GLOBAL_HOTKEYS_POOL
-        .iter()
-        .find(|shortcut| !used.contains(&shortcut.serialize()))
-        .cloned()
-    else {
-        return Ok(None);
-    };
-
-    let shortcut = next.serialize();
-
-    global_hotkey_store
-        .set(
-            &shortcut,
-            GlobalHotkeyStoreEntry {
-                bundle_id,
-                hotkey_id,
-            },
-        )
-        .or_throw_msg(&ctx, "failed to save global hotkey")?;
-
-    Ok(Some(shortcut))
+    let value = host_call(
+        &ctx,
+        HostRequest::RegisterGlobalHotkey {
+            bundle_id,
+            hotkey_id,
+        },
+    )?;
+    serde_json::from_value(value).or_throw_msg(&ctx, "invalid hotkey response")
 }
 
 fn set_app_needs_relaunch(ctx: Ctx, bundle_id: String, needs_relaunch: bool) -> rbun::Result<()> {
-    let handle = app_handle(&ctx)?;
-    let desktop_app_manager = handle.app_state().desktop_app_manager();
-    desktop_app_manager
-        .set_app_needs_relaunch(&bundle_id, needs_relaunch)
-        .or_throw_msg(&ctx, "failed to set app relaunch flag")?;
-    Ok(())
+    host_call(
+        &ctx,
+        HostRequest::SetAppNeedsRelaunch {
+            bundle_id,
+            needs_relaunch,
+        },
+    )
+    .map(|_| ())
 }
 
 fn get_app_windows<'js>(ctx: Ctx<'js>, bundle_id: String) -> rbun::Result<Value<'js>> {
@@ -396,21 +453,19 @@ fn encode_elevated_argument(argument: &str) -> String {
 
 /// `(package root, module path relative to it)` for the module at `module_path`.
 ///
-/// Inside the app the package is found through the package manager (the module was imported
-/// from the package directory, so its path is under a known root). Standalone
+/// Package workers use their configured on-disk root. Standalone
 /// (`chord bun file.ts`) the nearest ancestor with a `package.json` is taken as the root, so
 /// packages can be exercised from a checkout.
 fn locate_module_path<'js>(ctx: &Ctx<'js>, module_path: &Path) -> rbun::Result<(PathBuf, PathBuf)> {
     let module_path = module_path.to_path_buf();
 
-    if let Ok(handle) = app_handle(ctx) {
-        let package_manager = handle.app_state().chord_package_manager();
-        if let Some((_, root)) = package_manager.package_for_path(&module_path) {
-            let relative = module_path
-                .strip_prefix(&root)
-                .map(Path::to_path_buf)
-                .or_throw_msg(ctx, "module is not inside its package root")?;
-            return Ok((root, relative));
+    if let Some(root) = ctx.userdata::<AppUserData>().and_then(|data| {
+        data.package
+            .as_ref()
+            .map(|package| package.config.root.clone())
+    }) {
+        if let Ok(relative) = module_path.strip_prefix(&root) {
+            return Ok((root.clone(), relative.to_path_buf()));
         }
     }
 
@@ -539,10 +594,6 @@ impl ModuleDef for ChordModule {
     }
 
     fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rbun::Result<()> {
-        if let Ok(handle) = app_handle(ctx) {
-            init_app_lifecycle(handle);
-        }
-
         Class::<Applescript>::define(&ctx.globals())?;
         let applescript_ctor: Value<'js> = ctx.globals().get(Applescript::NAME)?;
 

@@ -1,6 +1,7 @@
 //! The embedded Bun runtime, exposed through `rbun`.
 //!
-//! Everything runs on a dedicated `bun-worker` thread that owns the Bun VM
+//! In package child processes and standalone CLI invocations, a dedicated
+//! `bun-worker` thread owns the Bun VM
 //! (JavaScriptCore is bound to the thread that created it) and a
 //! current-thread tokio runtime for the async host code.
 
@@ -13,12 +14,14 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::thread;
 use std::{cell::RefCell, future::Future, pin::Pin};
-use tauri::{AppHandle, Manager};
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, oneshot};
 
 mod chord_module;
 pub mod lifecycle;
+pub(crate) mod package_worker;
+pub(crate) mod protocol;
+mod registration;
 
 struct BunEngine {
     // Keep the runtime alive for as long as the context exists.
@@ -84,8 +87,14 @@ impl JsWorker {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct PackageContext {
+    pub config: protocol::WorkerConfig,
+    pub host: std::sync::Arc<package_worker::HostClient>,
+}
+
 pub struct AppUserData {
-    pub handle: Option<AppHandle>,
+    pub(crate) package: Option<PackageContext>,
 }
 
 // This tells rbun "this type does not contain JS references"
@@ -152,17 +161,16 @@ impl Loader for ModuleLoader {
     }
 }
 
-fn runtime_cwd(handle: Option<&AppHandle>) -> PathBuf {
-    handle
-        .and_then(|handle| handle.path().app_data_dir().ok())
-        .filter(|dir| dir.is_dir())
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("/"))
+fn runtime_cwd() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
 }
 
-async fn build_engine(handle: Option<AppHandle>) -> anyhow::Result<BunEngine> {
+async fn build_engine(package: Option<PackageContext>) -> anyhow::Result<BunEngine> {
     let rt = AsyncRuntime::new_with(RuntimeOptions {
-        cwd: runtime_cwd(handle.as_ref()),
+        cwd: package
+            .as_ref()
+            .map(|package| package.config.cwd.clone())
+            .unwrap_or_else(|| runtime_cwd()),
         argv: Some(vec!["chord".into()]),
         install_crash_handler: false,
     })?;
@@ -176,7 +184,7 @@ async fn build_engine(handle: Option<AppHandle>) -> anyhow::Result<BunEngine> {
     let context = AsyncContext::full(&rt).await?;
     async_with!(context => |ctx| {
         async {
-            ctx.store_userdata(AppUserData { handle })?;
+            ctx.store_userdata(AppUserData { package })?;
 
             Ok::<_, rbun::Error>(())
         }.await.map_err(|e| anyhow::format_err!("async_with failed: {}", format_js_error(&ctx, e)))
@@ -189,13 +197,13 @@ async fn build_engine(handle: Option<AppHandle>) -> anyhow::Result<BunEngine> {
     })
 }
 
-async fn ensure_engine(handle: Option<AppHandle>) -> anyhow::Result<AsyncContext> {
+async fn ensure_engine(package: Option<PackageContext>) -> anyhow::Result<AsyncContext> {
     let existing = BUN_ENGINE.with(|cell| cell.borrow().as_ref().map(|engine| engine.ctx.clone()));
     if let Some(ctx) = existing {
         return Ok(ctx);
     }
 
-    let engine = build_engine(handle).await?;
+    let engine = build_engine(package).await?;
     let out = engine.ctx.clone();
     BUN_ENGINE.with(|cell| {
         *cell.borrow_mut() = Some(engine);
@@ -207,7 +215,11 @@ async fn ensure_engine(handle: Option<AppHandle>) -> anyhow::Result<AsyncContext
 type LocalBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// Run `f` with a [`Ctx`] on the Bun worker thread.
-pub async fn with_js<F, R>(handle: AppHandle, f: F) -> anyhow::Result<R>
+pub(crate) async fn with_package_js<F, R>(
+    config: protocol::WorkerConfig,
+    host: std::sync::Arc<package_worker::HostClient>,
+    f: F,
+) -> anyhow::Result<R>
 where
     F: Send + 'static + for<'js> FnOnce(Ctx<'js>) -> LocalBoxFuture<'js, anyhow::Result<R>>,
     R: Send + 'static,
@@ -215,7 +227,8 @@ where
     JsWorker::global()
         .run(move |runtime| {
             runtime.block_on(async move {
-                let async_ctx: AsyncContext = ensure_engine(Some(handle)).await?;
+                let async_ctx: AsyncContext =
+                    ensure_engine(Some(PackageContext { config, host })).await?;
 
                 async_ctx.async_with(|ctx| f(ctx)).await
             })
@@ -365,4 +378,75 @@ pub async fn run_standalone_export(
 
 pub fn format_js_error<'js>(ctx: &Ctx<'js>, error: rbun::Error) -> String {
     rbun::format_error(ctx, error)
+}
+
+async fn execute_package_request(
+    ctx: Ctx<'_>,
+    request: protocol::Request,
+) -> anyhow::Result<serde_json::Value> {
+    use protocol::Request;
+    let result = async {
+        match request {
+            Request::Register {
+                module,
+                raw,
+                pathslug,
+                app_id,
+                args,
+            } => {
+                let id = registration::register(ctx.clone(), module, raw, pathslug, app_id, args)
+                    .await?;
+                return Ok(serde_json::Value::String(id));
+            }
+            Request::Invoke {
+                action,
+                app_id,
+                count,
+            } => {
+                crate::app::chord_runner::invoke_js_handler(ctx.clone(), &action, app_id, count)
+                    .await?;
+            }
+            Request::ReleaseSequences(ids) => {
+                crate::app::chord_runner::release_sequence_values(ctx.clone(), ids)?
+            }
+            Request::RetainHandlers(ids) => {
+                let ids: std::collections::HashSet<_> = ids.into_iter().collect();
+                if let Some(registry) = ctx
+                    .globals()
+                    .get::<_, Option<Object>>("__RUST_HANDLER_REGISTRY")?
+                {
+                    for key in registry
+                        .keys::<String>()
+                        .collect::<rbun::Result<Vec<_>>>()?
+                    {
+                        if !ids.contains(&key) {
+                            registry.remove(key)?;
+                        }
+                    }
+                }
+            }
+            Request::Lifecycle { app, launch } => {
+                // Lifecycle helpers already return anyhow errors with callback context.
+                return if launch {
+                    lifecycle::invoke_launch_callbacks(ctx.clone(), app).await
+                } else {
+                    lifecycle::invoke_terminate_callbacks(ctx.clone(), app).await
+                }
+                .map(|_| serde_json::Value::Null);
+            }
+            Request::Ping => {
+                // A plain VM tick drains microtasks but does not poll Bun's I/O/timer loop.
+                // Awaiting a short native timer drives that loop without parking on a
+                // package's long-lived interval, server, or idle native callback.
+                let turn: rbun::Promise = ctx.eval("Bun.sleep(1)")?;
+                turn.into_future::<Value>().await?;
+            }
+        }
+        Ok::<_, anyhow::Error>(serde_json::Value::Null)
+    }
+    .await;
+    result.map_err(|error| match error.downcast::<rbun::Error>() {
+        Ok(js_error) => anyhow::anyhow!(format_js_error(&ctx, js_error)),
+        Err(error) => error,
+    })
 }

@@ -212,7 +212,7 @@ impl ParsedChordsFile {
                 keys: Key::parse_sequence(&sequence)?,
             }
         } else if raw_pattern.contains('(') {
-            if let Ok(re) = Regex::new(raw_pattern) {
+            if let Ok(re) = parse_chord_pattern(raw_pattern) {
                 ChordHintPattern::Regex(re)
             } else {
                 if let Ok(keys) = Key::parse_sequence(raw_pattern) {
@@ -240,7 +240,7 @@ impl ParsedChordsFile {
         let raw_trigger = key;
 
         let trigger = if raw_trigger.contains('(') {
-            ChordTrigger::Pattern(Regex::new(key)?)
+            ChordTrigger::Pattern(parse_chord_pattern(key)?)
         } else {
             ChordTrigger::Keys(Key::parse_sequence(key)?)
         };
@@ -325,6 +325,32 @@ impl ParsedChordsFile {
     }
 }
 
+/// Only parenthesized sections are regex; the surrounding chord keys are literal.
+fn parse_chord_pattern(raw: &str) -> Result<Regex> {
+    let mut pattern = String::from(r"\A(?:");
+    let mut remaining = raw;
+    while let Some(start) = remaining.find('(') {
+        pattern.push_str(&regex::escape(&remaining[..start]));
+        remaining = &remaining[start..];
+        // Let the regex parser find the end of a complete group. This also handles
+        // nested groups, escaped parentheses, character classes and regex comments.
+        let end = remaining
+            .char_indices()
+            .filter(|(_, c)| *c == ')')
+            .map(|(index, _)| index + 1)
+            .find(|&end| Regex::new(&remaining[..end]).is_ok())
+            .with_context(|| format!("invalid parenthesized regex in chord {raw:?}"))?;
+        // Scope inline regex flags to this section without adding a capture group.
+        pattern.push_str("(?:");
+        pattern.push_str(&remaining[..end]);
+        pattern.push(')');
+        remaining = &remaining[end..];
+    }
+    pattern.push_str(&regex::escape(remaining));
+    pattern.push_str(r")\z");
+    Ok(Regex::new(&pattern)?)
+}
+
 pub(crate) fn is_event_identifier(identifier: &str) -> bool {
     let mut chars = identifier.chars();
     chars
@@ -405,6 +431,101 @@ impl FromStr for ParsedChordsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regex_sections_keep_surrounding_keys_literal_and_match_the_full_sequence() {
+        for (pattern, input, rejected) in [
+            (r"hs.(\d+)", "hs.12", "hs,12"),
+            (r"t.(\d+)", "t.12", "t,12"),
+            (r".(.+)", ".b20l.5", "xb20l.5"),
+            (r"/d.(\d+).", "/d.12.", "/d,12,"),
+            (r"/d.,(\d+)", "/d.,12", "/dx,12"),
+            (r"[(\d+)]", "[12]", "12"),
+            (r"a(\d+)?", "a12?", "a12"),
+            (r"a(\d+)|b", "a12|b", "b"),
+        ] {
+            let ChordTrigger::Pattern(regex) =
+                ParsedChordsFile::parse_trigger(pattern, &Table::new()).unwrap()
+            else {
+                panic!("expected regex for {pattern}");
+            };
+            assert!(regex.is_match(input), "{pattern} should match {input}");
+            for rejected in [rejected.to_string(), format!("x{input}")] {
+                assert!(!regex.is_match(&rejected), "{pattern} matched {rejected}");
+            }
+            // A trailing character is valid when the group deliberately accepts anything.
+            if pattern != r".(.+)" {
+                assert!(!regex.is_match(&format!("{input}x")));
+            }
+        }
+        let hint = ParsedChordsFile::parse_hint(r"?hs.(\d+)", &Table::new()).unwrap();
+        let ChordHintPattern::Regex(regex) = hint.pattern else {
+            panic!("expected regex hint");
+        };
+        assert!(regex.is_match("hs.12"));
+        assert!(!regex.is_match("hs,12"));
+    }
+
+    #[test]
+    fn regex_sections_preserve_nested_groups_classes_escapes_and_capture_numbers() {
+        let regex = parse_chord_pattern(r"hs.((?:\d+|[()]+)\.?).([a-z]+)").unwrap();
+        let captures = regex.captures("hs.12..reply").unwrap();
+        assert_eq!(&captures[1], "12.");
+        assert_eq!(&captures[2], "reply");
+        assert!(regex.is_match("hs.().reply"));
+        assert!(parse_chord_pattern(r"hs.(\(\)).(\d+)")
+            .unwrap()
+            .is_match("hs.().12"));
+        assert!(parse_chord_pattern(r"hs.([]()]+)")
+            .unwrap()
+            .is_match("hs.]()"));
+        assert!(parse_chord_pattern(r"hs.([a-z&&[^aeiou]]+)")
+            .unwrap()
+            .is_match("hs.bcd"));
+    }
+
+    #[test]
+    fn regex_flags_are_scoped_and_invalid_sections_are_rejected() {
+        let regex = parse_chord_pattern(r"hs.((?i)reply).end").unwrap();
+        assert!(regex.is_match("hs.REPLY.end"));
+        assert!(!regex.is_match("HS.REPLY.end"));
+        assert!(!regex.is_match("hs.REPLY.END"));
+        let regex = parse_chord_pattern("hs.((?x)a # ignored ( )\n b).end").unwrap();
+        assert!(regex.is_match("hs.ab.end"));
+        for pattern in ["hs.(", "hs.(a", "hs.([)", "hs.(a{2,1})"] {
+            assert!(parse_chord_pattern(pattern).is_err(), "accepted {pattern}");
+        }
+    }
+
+    #[test]
+    fn toml_story_keys_match_literals_and_keep_capture_arguments() {
+        let file: ParsedChordsFile = r#"
+name = "Instagram"
+[chords]
+'hs.(\d+)' = { '@input:instagram' = ['story', '$1'] }
+'hsr(\d+)' = { '@input:instagram' = ['story', '$1'] }
+"#
+        .parse()
+        .unwrap();
+        assert_eq!(file.chords.len(), 2);
+        for (pattern, input) in [(r"hs.(\d+)", "hs.12"), (r"hsr(\d+)", "hsr12")] {
+            let chord = file
+                .chords
+                .iter()
+                .find(|chord| chord.raw_trigger == pattern)
+                .unwrap();
+            assert!(chord.trigger.matches(&Key::parse_sequence(input).unwrap()));
+            assert!(!chord.trigger.matches(&Key::parse_sequence("hs,12").unwrap()));
+            let ChordTrigger::Pattern(regex) = &chord.trigger else {
+                panic!("expected regex");
+            };
+            assert_eq!(&regex.captures(input).unwrap()[1], "12");
+            let ChordAction::Emit(action) = &chord.actions[0] else {
+                panic!("expected input action");
+            };
+            assert_eq!(action.args[1].as_str(), Some("$1"));
+        }
+    }
 
     #[test]
     fn parses_input_actions() {

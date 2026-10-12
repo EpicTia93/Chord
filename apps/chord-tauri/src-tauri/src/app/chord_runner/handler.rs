@@ -1,5 +1,5 @@
 use crate::app::chord_runner::ChordActionTask;
-use crate::bun_js::{format_js_error, with_js};
+use crate::bun_js::{format_js_error, package_worker};
 use crate::models::HandlerChordAction;
 use anyhow::Result;
 use nject::injectable;
@@ -17,6 +17,7 @@ pub struct HandlerChordActionTaskRunner {
 #[derive(Debug)]
 pub struct HandlerChordActionTaskRun {
     join_handle: JoinHandle<Result<()>>,
+    handler_id: String,
 }
 
 impl HandlerChordActionTaskRunner {
@@ -27,6 +28,7 @@ impl HandlerChordActionTaskRunner {
     ) -> Result<HandlerChordActionTaskRun> {
         Ok(HandlerChordActionTaskRun {
             join_handle: self.start_js(task, action),
+            handler_id: action.handler_id.clone(),
         })
     }
 
@@ -35,20 +37,12 @@ impl HandlerChordActionTaskRunner {
         task: &ChordActionTask,
         action: &HandlerChordAction,
     ) -> JoinHandle<Result<()>> {
-        let handle = self.handle.clone();
         let action = action.clone();
         let num_times = task.num_times;
         let frontmost_id = task.event.application_id.clone();
 
         tauri::async_runtime::spawn(async move {
-            with_js(handle, move |ctx| {
-                Box::pin(async move {
-                    invoke_js_handler(ctx.clone(), &action, frontmost_id, num_times)
-                        .await
-                        .map_err(|error| anyhow::Error::msg(format_js_error(&ctx, error)))
-                })
-            })
-            .await
+            package_worker::invoke(action, frontmost_id, num_times).await
         })
     }
 
@@ -56,9 +50,9 @@ impl HandlerChordActionTaskRunner {
         task_run.join_handle.await?
     }
 
-    // TODO: implement deep aborting of JS via AbortController
     #[allow(dead_code)]
     pub fn abort(&self, task_run: HandlerChordActionTaskRun) -> Result<()> {
+        package_worker::abort(&task_run.handler_id);
         task_run.join_handle.abort();
         Ok(())
     }
@@ -91,17 +85,18 @@ pub async fn release_chord_sequences(handle: AppHandle, ids: Vec<String>) -> Res
     if ids.is_empty() {
         return Ok(());
     }
-    with_js(handle, move |ctx| {
-        Box::pin(async move {
-            if let Some(registry) = ctx.globals().get::<_, Option<Object>>(SEQUENCE_VALUES)? {
-                for id in ids {
-                    registry.remove(id)?;
-                }
-            }
-            Ok(())
-        })
-    })
-    .await
+    let _ = handle;
+    package_worker::release_sequences(ids).await;
+    Ok(())
+}
+
+pub(crate) fn release_sequence_values(ctx: Ctx<'_>, ids: Vec<String>) -> rbun::Result<()> {
+    if let Some(registry) = ctx.globals().get::<_, Option<Object>>(SEQUENCE_VALUES)? {
+        for id in ids {
+            registry.remove(id)?;
+        }
+    }
+    Ok(())
 }
 
 fn resolve_event_argument<'js>(
@@ -150,7 +145,7 @@ fn resolve_event_argument<'js>(
     }
 }
 
-async fn invoke_js_handler<'js>(
+pub(crate) async fn invoke_js_handler<'js>(
     ctx: Ctx<'js>,
     action: &HandlerChordAction,
     frontmost_id: Option<String>,
@@ -176,6 +171,7 @@ async fn invoke_js_handler<'js>(
         }
         let handler_context = Object::new(ctx.clone())?;
         handler_context.set("focusedAppId", frontmost_id.clone())?;
+        handler_context.set("input", action.input.clone())?;
         if let Some(event) = &action.keyboard_event {
             let event_value = rbun::serde::to_value(ctx.clone(), event)?;
             let create_event: Function = ctx.eval(r#"(function(data) {
@@ -228,6 +224,7 @@ mod tests {
         HandlerChordAction {
             handler_id: handler.into(),
             event_args: args,
+            input: "j,12".into(),
             sequence_id: Some(scope.into()),
             assign_to: assignment.map(str::to_string),
             keyboard_event: Some(ChordKeyboardEvent::new(
@@ -256,6 +253,7 @@ globalThis.__RUST_HANDLER_REGISTRY = {
         if (!(this.event instanceof Event) || this.event.type !== 'keydown' || this.event.key !== 'Backspace' || this.event.code !== 'Backspace' || !this.event.getModifierState('Shift') || this.event.getModifierState('Control')) throw new Error('incorrect keyboard event');
         if (this.event.target !== null || this.event.cancelable !== false) throw new Error('incorrect Event shape');
         if (this.focusedAppId !== 'dev.fixture') throw new Error('missing app context');
+        if (this.input !== 'j,12') throw new Error('missing chord input');
         state.count++;
         return state.fn() + state.count;
     },

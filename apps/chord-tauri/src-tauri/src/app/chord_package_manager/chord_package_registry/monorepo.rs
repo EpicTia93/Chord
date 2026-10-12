@@ -141,7 +141,7 @@ mod tests {
             ".jj/chords-metadata",
             ".moon/cache/states/chords-one",
             "group/.build/checkouts/chords-one",
-            ".chord-native-build/chords-one",
+            "node_modules/.cache/chord/native/chords-one",
         ] {
             fixture.package(folder, "@test/one");
         }

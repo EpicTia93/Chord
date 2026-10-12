@@ -45,9 +45,6 @@ pub struct ChordPackageManager {
     #[inject(Mutex::new(None))]
     last_reload_error: Mutex<Option<String>>,
 
-    #[inject(AtomicU64::new(0))]
-    lifecycle_generation: AtomicU64,
-
     observable: ChordPackageManagerObservable,
     handle: AppHandle,
 }
@@ -136,6 +133,63 @@ fn parse_package_chords_file(path: &Path, contents: &str) -> Result<ParsedChords
     contents
         .parse()
         .with_context(|| format!("Failed to parse {}", path.display()))
+}
+
+fn imported_chords_path(pathslug: &Path, file: &Path) -> PathBuf {
+    let bundled = pathslug
+        .components()
+        .nth(1)
+        .and_then(|part| part.as_os_str().to_str())
+        .is_some_and(|part| part.starts_with('@'));
+    if bundled {
+        pathslug
+            .components()
+            .take(3)
+            .collect::<PathBuf>()
+            .join("chords")
+            .join(file)
+    } else {
+        Path::new("chords").join(file)
+    }
+}
+
+/// Validate without Rust recursion: a package import cycle otherwise overflows the GUI stack.
+fn validate_chords_imports(root: &Path, files: &HashMap<PathBuf, ParsedChordsFile>) -> Result<()> {
+    let mut pending = vec![(root.to_path_buf(), false)];
+    let mut visiting = HashSet::new();
+    let mut visits = 0;
+    let mut items = 0;
+    while let Some((path, exit)) = pending.pop() {
+        if exit {
+            visiting.remove(&path);
+            continue;
+        }
+        anyhow::ensure!(
+            visiting.insert(path.clone()),
+            "cyclic chords import at {}",
+            path.display()
+        );
+        anyhow::ensure!(
+            visiting.len() <= 64,
+            "chords imports exceed 64 levels at {}",
+            path.display()
+        );
+        visits += 1;
+        let file = files
+            .get(&path)
+            .with_context(|| format!("import file {} not found", path.display()))?;
+        items += file.chords.len() + file.handlers.len() + file.chord_hints.len();
+        anyhow::ensure!(
+            visits + pending.len() + file.imports.len() <= 4096 && items <= 100_000,
+            "chords import expansion is too large at {}",
+            root.display()
+        );
+        pending.push((path.clone(), true));
+        for import in file.imports.iter().rev() {
+            pending.push((imported_chords_path(&path, Path::new(&import.file)), false));
+        }
+    }
+    Ok(())
 }
 
 fn ensure_selected_packages_loaded(
@@ -246,6 +300,73 @@ file = 42
         assert_eq!(parsed.chords.len(), 1);
         assert_eq!(parsed.chords[0].raw_trigger, "/,");
     }
+
+    #[test]
+    fn cycles_and_exponential_imports_are_rejected_before_compilation() {
+        let parse = |source: &str| source.parse::<ParsedChordsFile>().unwrap();
+        let a = PathBuf::from("chords/a.toml");
+        let b = PathBuf::from("chords/b.toml");
+        let cyclic = HashMap::from([
+            (a.clone(), parse("name = 'a'\n[[import]]\nfile = 'b.toml'")),
+            (b.clone(), parse("name = 'b'\n[[import]]\nfile = 'a.toml'")),
+        ]);
+        assert!(
+            validate_chords_imports(&a, &cyclic)
+                .unwrap_err()
+                .to_string()
+                .contains("cyclic chords import")
+        );
+        let mut expanding = HashMap::new();
+        for index in 0..15 {
+            let source = if index == 14 {
+                "name = 'leaf'".into()
+            } else {
+                format!(
+                    "name = 'branch'\n[[import]]\nfile = '{}.toml'\n[[import]]\nfile = '{}.toml'",
+                    index + 1,
+                    index + 1
+                )
+            };
+            expanding.insert(
+                PathBuf::from(format!("chords/{index}.toml")),
+                parse(&source),
+            );
+        }
+        assert!(
+            validate_chords_imports(Path::new("chords/0.toml"), &expanding)
+                .unwrap_err()
+                .to_string()
+                .contains("expansion is too large")
+        );
+    }
+
+    #[test]
+    fn valid_diamond_and_vendored_imports_keep_their_paths() {
+        let parse = |source: &str| source.parse::<ParsedChordsFile>().unwrap();
+        let files = HashMap::from([
+            (
+                PathBuf::from("chords/root.toml"),
+                parse("name = 'root'\n[[import]]\nfile = 'a.toml'\n[[import]]\nfile = 'b.toml'"),
+            ),
+            (
+                PathBuf::from("chords/a.toml"),
+                parse("name = 'a'\n[[import]]\nfile = 'leaf.toml'"),
+            ),
+            (
+                PathBuf::from("chords/b.toml"),
+                parse("name = 'b'\n[[import]]\nfile = 'leaf.toml'"),
+            ),
+            (PathBuf::from("chords/leaf.toml"), parse("name = 'leaf'")),
+        ]);
+        validate_chords_imports(Path::new("chords/root.toml"), &files).unwrap();
+        assert_eq!(
+            imported_chords_path(
+                Path::new("chords/@scope/package/chords/root.toml"),
+                Path::new("leaf.toml")
+            ),
+            PathBuf::from("chords/@scope/package/chords/leaf.toml")
+        );
+    }
 }
 
 impl ChordPackageManager {
@@ -310,8 +431,6 @@ impl ChordPackageManager {
     async fn reload_once(&self, required_packages: &[String]) -> Result<()> {
         let raw_chord_packages = self.registry.import_all_packages()?;
         let previous_roots = self.package_roots.read().clone();
-        let previous_handler_ids = handler_ids(&self.packages.read());
-        let lifecycle_generation = crate::bun_js::lifecycle::begin_registration_generation();
 
         let next_roots = raw_chord_packages
             .values()
@@ -346,10 +465,6 @@ impl ChordPackageManager {
         ensure_selected_packages_loaded(required_packages, &package_errors)?;
 
         let next_handler_ids = handler_ids(&chord_packages);
-        let retained_handler_ids = previous_handler_ids
-            .union(&next_handler_ids)
-            .cloned()
-            .collect::<HashSet<_>>();
         let observable_packages = chord_packages.values().cloned().collect();
 
         *self.packages.write() = chord_packages;
@@ -358,14 +473,8 @@ impl ChordPackageManager {
             packages: observable_packages,
         });
 
-        self.lifecycle_generation
-            .store(lifecycle_generation, Ordering::SeqCst);
-        if let Err(error) = bun_handlers::retain_runtime_registrations(
-            self.handle.clone(),
-            retained_handler_ids,
-            lifecycle_generation,
-        )
-        .await
+        if let Err(error) =
+            bun_handlers::retain_runtime_registrations(self.handle.clone(), next_handler_ids).await
         {
             log::warn!("Failed to prune stale Bun registrations after reload: {error:#}");
         }
@@ -434,9 +543,7 @@ impl ChordPackageManager {
             .load_js_package(&name, root, raw_chord_package.js_files_contents)
             .await?;
 
-        // Bun owns one VM on one thread, so spawning one Tokio task per file only creates a
-        // memory-heavy queue. Compile sequentially and let the bounded Bun worker provide the
-        // ordering and backpressure.
+        // Compile sequentially inside this package's bounded worker queue.
         for (pathslug, parsed_chord_file) in &parsed_chords_files {
             let compile_result = Self::compile_chords_file(
                 self.handle.clone(),
@@ -532,6 +639,26 @@ impl ChordPackageManager {
         parsed_chords_files: &HashMap<PathBuf, ParsedChordsFile>,
         r#override: &Option<ChordsFileImportOverride>,
     ) -> Result<CompiledChordsFile> {
+        validate_chords_imports(&pathslug, parsed_chords_files)?;
+        Self::compile_validated_chords_file(
+            handle,
+            chords_file,
+            pathslug,
+            js_package,
+            parsed_chords_files,
+            r#override,
+        )
+        .await
+    }
+
+    async fn compile_validated_chords_file(
+        handle: AppHandle,
+        chords_file: &ParsedChordsFile,
+        pathslug: FilePathslug,
+        js_package: &Option<ChordJsPackage>,
+        parsed_chords_files: &HashMap<PathBuf, ParsedChordsFile>,
+        r#override: &Option<ChordsFileImportOverride>,
+    ) -> Result<CompiledChordsFile> {
         log::debug!("compiling chords file {}", chords_file.name);
 
         let mut chords = chords_file.chords.clone();
@@ -579,19 +706,8 @@ impl ChordPackageManager {
             });
         }
 
-        let is_bundled_chords_file = pathslug
-            .components()
-            .nth(1)
-            .and_then(|c| c.as_os_str().to_str())
-            .map(|s| s.starts_with('@'))
-            .unwrap_or(false);
         for import in &chords_file.imports {
-            let imported_file_path = if is_bundled_chords_file {
-                let package_name = pathslug.components().take(3).collect::<PathBuf>();
-                package_name.join("chords").join(&import.file)
-            } else {
-                Path::new("chords").join(&import.file)
-            };
+            let imported_file_path = imported_chords_path(&pathslug, Path::new(&import.file));
 
             let imported_file = parsed_chords_files
                 .get(&imported_file_path)
@@ -602,7 +718,7 @@ impl ChordPackageManager {
                 imported_file_path
             );
 
-            let compiled_file = Box::pin(Self::compile_chords_file(
+            let compiled_file = Box::pin(Self::compile_validated_chords_file(
                 handle.clone(),
                 imported_file,
                 imported_file_path,
@@ -707,42 +823,21 @@ impl ChordPackageManager {
 }
 
 mod bun_handlers {
-    use crate::bun_js::{format_js_error, lifecycle, with_js};
-    use rbun::Module;
-    #[allow(unused_imports)]
-    use rbun::prelude::OptionExt;
-    use rbun::prelude::{Args, Object, ResultExt, Value};
+    use crate::app::AppHandleExt;
+    use crate::bun_js::{package_worker, protocol::Request};
     use std::collections::HashSet;
     use tauri::AppHandle;
 
     pub async fn retain_runtime_registrations(
         handle: AppHandle,
         handler_ids: HashSet<String>,
-        lifecycle_generation: u64,
     ) -> anyhow::Result<()> {
-        with_js(handle, move |ctx| {
-            Box::pin(async move {
-                let globals = ctx.globals();
-                let registry: Option<Object> = globals.get("__RUST_HANDLER_REGISTRY")?;
-                if let Some(registry) = registry {
-                    let keys = registry
-                        .keys::<String>()
-                        .collect::<rbun::Result<Vec<_>>>()?;
-                    for key in keys {
-                        if !handler_ids.contains(&key) {
-                            registry.remove(key)?;
-                        }
-                    }
-                }
-                lifecycle::retain_registration_generation(lifecycle_generation);
-                Ok(())
-            })
-        })
-        .await
+        let packages = handle.app_state().chord_package_manager();
+        let roots = packages.package_roots.read().clone();
+        package_worker::retain_handlers(handler_ids, roots).await;
+        Ok(())
     }
 
-    /// Import a handler module, call its default export with the build context, and register the
-    /// returned handler function.
     pub async fn register_handler(
         handle: AppHandle,
         module_specifier: String,
@@ -751,87 +846,17 @@ mod bun_handlers {
         bundle_id: Option<String>,
         build_args: Vec<toml::Value>,
     ) -> anyhow::Result<String> {
-        with_js(handle, move |ctx| {
-            Box::pin(async move {
-                async {
-                    let module_promise = Module::import(&ctx, module_specifier)?;
-                    let module = module_promise.into_future::<Object>().await?;
-                    let mut export: Value = module.get("default")?;
-
-                    if let Some(promise) = export.as_promise().cloned() {
-                        export = promise.into_future::<Value>().await?;
-                    }
-
-                    let build_handler_function = export.as_function().cloned().or_throw_msg(
-                        &ctx,
-                        &format!(
-                            "JS default export did not resolve to a function: {:?}",
-                            export
-                        ),
-                    )?;
-
-                    let build_context = Object::new(ctx.clone())?;
-                    build_context.set(
-                        "chordsFile",
-                        rbun::serde::to_value(ctx.clone(), raw)
-                            .or_throw_msg(&ctx, "failed to parse chords file")?,
-                    )?;
-                    build_context.set(
-                        "chordsFilePath",
-                        rbun::serde::to_value(ctx.clone(), pathslug_string)
-                            .or_throw_msg(&ctx, "failed to parse chords file pathslug")?,
-                    )?;
-                    build_context.set(
-                        "chordsFileAppId",
-                        rbun::serde::to_value(ctx.clone(), bundle_id)
-                            .or_throw_msg(&ctx, "failed to parse chords file app ID")?,
-                    )?;
-
-                    let mut args = Args::new(ctx.clone(), build_args.len());
-                    args.this(build_context)?;
-                    log::debug!("calling build_handler with args {:?} (bun)", build_args);
-
-                    let js_args = build_args
-                        .into_iter()
-                        .map(|value| {
-                            rbun::serde::to_value(ctx.clone(), value)
-                                .or_throw_msg(&ctx, "failed to convert event TOML arguments")
-                        })
-                        .collect::<rbun::Result<Vec<_>>>()?;
-
-                    for value in js_args {
-                        args.push_arg(value)?;
-                    }
-
-                    let mut handler: Value = build_handler_function.call_arg(args)?;
-                    if let Some(promise) = handler.as_promise().cloned() {
-                        handler = promise.into_future::<Value>().await?;
-                    }
-
-                    let handler_function = handler
-                        .as_function()
-                        .cloned()
-                        .or_throw_msg(&ctx, "the default export function must return a function")?;
-                    let globals = ctx.globals();
-                    let registry_key = "__RUST_HANDLER_REGISTRY";
-
-                    // Fetch the global registry object, or create it if it doesn't exist
-                    let registry: Object = match globals.get(registry_key) {
-                        Ok(obj) => obj,
-                        Err(_) => {
-                            let obj = Object::new(ctx.clone())?;
-                            globals.set(registry_key, obj.clone())?;
-                            obj
-                        }
-                    };
-                    let id = uuid::Uuid::new_v4().to_string();
-                    registry.set(&id, handler_function)?;
-                    Ok(id)
-                }
-                .await
-                .map_err(|e| anyhow::anyhow!(format_js_error(&ctx, e)))
-            })
-        })
+        package_worker::register(
+            handle,
+            module_specifier.clone(),
+            Request::Register {
+                module: module_specifier,
+                raw,
+                pathslug: pathslug_string,
+                app_id: bundle_id,
+                args: build_args,
+            },
+        )
         .await
     }
 }

@@ -1,12 +1,12 @@
 use super::{Key, KeyEvent};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use std::time::Instant;
 use typeshare::typeshare;
 
 /// The KeyboardEvent data exposed as a JavaScript handler's `this.event`.
 #[typeshare]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChordKeyboardEvent {
     pub r#type: String,

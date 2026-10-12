@@ -7,6 +7,7 @@ use serde::Serialize;
 use specta::Type;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Wry};
@@ -17,6 +18,72 @@ use walkdir::WalkDir;
 pub const CHORD_SOURCES_STORE_PATH: &str = "chord-sources.json";
 pub const LOCAL_FOLDERS_KEY: &str = "localFolders";
 pub const LOCAL_MONOREPOS_KEY: &str = "localMonorepos";
+
+const MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PACKAGE_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
+
+fn read_package_source(path: &Path, remaining: &mut u64) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        fs::metadata(path)?.is_file(),
+        "package source {} must be a regular file",
+        path.display()
+    );
+    let file = fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    let limit = MAX_SOURCE_BYTES.min(*remaining);
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() <= limit,
+        "package source {} exceeds its size budget (8 MiB per file, 32 MiB per package)",
+        path.display()
+    );
+    let mut contents = Vec::new();
+    file.take(limit + 1).read_to_end(&mut contents)?;
+    anyhow::ensure!(
+        contents.len() as u64 <= limit,
+        "package source {} grew beyond its size budget",
+        path.display()
+    );
+    *remaining -= contents.len() as u64;
+    Ok(String::from_utf8(contents)?)
+}
+
+#[cfg(test)]
+mod package_read_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_oversized_sources_and_keeps_binary_payloads_out_of_gui_memory() {
+        let root =
+            std::env::temp_dir().join(format!("chord-package-read-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("js")).unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(root.join("js/healthy.js"), "export default () => () => {};").unwrap();
+        // Sparse files exercise the limits without allocating gigabytes in the test.
+        fs::File::create(root.join("bin/helper"))
+            .unwrap()
+            .set_len(6 * 1024 * 1024 * 1024)
+            .unwrap();
+        let package = LocalPackageRegistry::import_from_local_folder(&root).unwrap();
+        assert!(package.bin_files_contents.is_empty());
+        assert_eq!(package.js_files_contents.len(), 1);
+        let large = root.join("js/large.js");
+        fs::File::create(&large)
+            .unwrap()
+            .set_len(MAX_SOURCE_BYTES + 1)
+            .unwrap();
+        let error = LocalPackageRegistry::import_from_local_folder(&root)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("large.js") && error.contains("size budget"),
+            "{error}"
+        );
+        fs::remove_file(large).unwrap();
+        let mut remaining = 3;
+        assert!(read_package_source(&root.join("js/healthy.js"), &mut remaining).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
 
 #[derive(Serialize, Type)]
 pub struct LocalChordPackage {
@@ -266,17 +333,26 @@ impl LocalPackageRegistry {
     pub fn import_from_local_folder(root: &Path) -> anyhow::Result<RawChordPackage> {
         let mut chords_files_contents = HashMap::new();
         let mut js_files_contents = HashMap::new();
-        let mut bin_files_contents = HashMap::new();
+        let bin_files_contents = HashMap::new();
+        let mut remaining = MAX_PACKAGE_SOURCE_BYTES;
 
         let dirname = root
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
-        let package_json_contents = fs::read_to_string(root.join("package.json")).ok();
+        let manifest = root.join("package.json");
+        let package_json_contents = if manifest.exists() {
+            Some(read_package_source(&manifest, &mut remaining)?)
+        } else {
+            None
+        };
 
         // Native modules under `target/` are not read: the package's own JS loads them from
         // disk with `process.dlopen` (see `import.meta.chord.resolveNative`).
-        for dir in ["chords", "js", "bin"] {
+        // Executables in bin/ are also consumed from disk by workers; their bytes never
+        // need to be copied into the GUI's memory.
+        let mut entries = 0;
+        for dir in ["chords", "js"] {
             let dir_path = root.join(dir);
             if !dir_path.exists() {
                 continue;
@@ -284,6 +360,12 @@ impl LocalPackageRegistry {
 
             for entry in WalkDir::new(&dir_path) {
                 let entry = entry?;
+                entries += 1;
+                anyhow::ensure!(
+                    entries <= 10_000,
+                    "package {} contains too many source entries",
+                    root.display()
+                );
                 let path = entry.path();
 
                 if !path.is_file() {
@@ -294,18 +376,14 @@ impl LocalPackageRegistry {
 
                 match dir {
                     "chords" => {
-                        let content = fs::read_to_string(path)?;
+                        let content = read_package_source(path, &mut remaining)?;
                         chords_files_contents.insert(relpath.to_path_buf(), content);
                     }
                     "js" => {
                         if path.extension().is_some_and(|ext| ext == "js") {
-                            let content = fs::read_to_string(path)?;
+                            let content = read_package_source(path, &mut remaining)?;
                             js_files_contents.insert(relpath.to_path_buf(), content);
                         }
-                    }
-                    "bin" => {
-                        let content = fs::read(path)?;
-                        bin_files_contents.insert(relpath.to_path_buf(), content);
                     }
                     _ => {}
                 }

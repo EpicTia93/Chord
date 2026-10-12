@@ -1,0 +1,373 @@
+{
+  "schema_version": 1,
+  "measured_at": "2026-10-12T19:45:24.362Z",
+  "runs": 3,
+  "samples": 1000,
+  "warmup": 100,
+  "workers": 4,
+  "hardware": {
+    "model": "Mac14,6",
+    "chip": "Apple M2 Max",
+    "memory": "64 GB"
+  },
+  "os": "26.5.2",
+  "rust": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+  "runner_bun": "1.4.2",
+  "embedded_bun": "1.4.2",
+  "cases": [
+    {
+      "name": "noop",
+      "in_process_p50_us": 10.332999999999998,
+      "worker_p50_us": 36.708,
+      "delta_p50_us": 26.375,
+      "in_process_p95_us": 15.583,
+      "worker_p95_us": 72.58300000000001,
+      "worker_over_in_process": 3.55250169360302,
+      "in_process_ops_s": 90199.08471380778,
+      "worker_ops_s": 22480.831213447156
+    },
+    {
+      "name": "keyboard_event",
+      "in_process_p50_us": 21.792,
+      "worker_p50_us": 49.459,
+      "delta_p50_us": 27.667,
+      "in_process_p95_us": 40.875,
+      "worker_p95_us": 79.583,
+      "worker_over_in_process": 2.2695943465491926,
+      "in_process_ops_s": 40584.41887860542,
+      "worker_ops_s": 18340.613884556326
+    },
+    {
+      "name": "resolved_promise",
+      "in_process_p50_us": 22.75,
+      "worker_p50_us": 54.083999999999996,
+      "delta_p50_us": 31.333999999999996,
+      "in_process_p95_us": 46.334,
+      "worker_p95_us": 99,
+      "worker_over_in_process": 2.3773186813186813,
+      "in_process_ops_s": 37703.12985368886,
+      "worker_ops_s": 16229.846040921382
+    },
+    {
+      "name": "sequence_object_identity",
+      "in_process_p50_us": 21.542,
+      "worker_p50_us": 48.875,
+      "delta_p50_us": 27.333,
+      "in_process_p95_us": 45.125,
+      "worker_p95_us": 90.375,
+      "worker_over_in_process": 2.2688236932503942,
+      "in_process_ops_s": 39246.96995730791,
+      "worker_ops_s": 17934.202924573514
+    },
+    {
+      "name": "arguments_1KiB",
+      "in_process_p50_us": 24.208,
+      "worker_p50_us": 53.458000000000006,
+      "delta_p50_us": 29.250000000000007,
+      "in_process_p95_us": 51.208999999999996,
+      "worker_p95_us": 93.791,
+      "worker_over_in_process": 2.208278255122274,
+      "in_process_ops_s": 35171.19349822504,
+      "worker_ops_s": 16484.57149609224
+    },
+    {
+      "name": "arguments_64KiB",
+      "in_process_p50_us": 107.166,
+      "worker_p50_us": 180.875,
+      "delta_p50_us": 73.709,
+      "in_process_p95_us": 137.375,
+      "worker_p95_us": 221.917,
+      "worker_over_in_process": 1.6878021014127615,
+      "in_process_ops_s": 8743.324580973976,
+      "worker_ops_s": 5273.705027227876
+    },
+    {
+      "name": "native_timer_1ms",
+      "in_process_p50_us": 1162.041,
+      "worker_p50_us": 1252.666,
+      "delta_p50_us": 90.625,
+      "in_process_p95_us": 1268.458,
+      "worker_p95_us": 1398.2910000000002,
+      "worker_over_in_process": 1.077987781842465,
+      "in_process_ops_s": 853.2617157782496,
+      "worker_ops_s": 787.2264665034215
+    },
+    {
+      "name": "repeat_32",
+      "in_process_p50_us": 377.79200000000003,
+      "worker_p50_us": 457.75,
+      "delta_p50_us": 79.95799999999997,
+      "in_process_p95_us": 596.416,
+      "worker_p95_us": 684.375,
+      "worker_over_in_process": 1.2116455615788582,
+      "in_process_ops_s": 80476.99924608142,
+      "worker_ops_s": 66740.93611942396
+    },
+    {
+      "name": "release_sequence",
+      "in_process_p50_us": 6.7909999999999995,
+      "worker_p50_us": 32.417,
+      "delta_p50_us": 25.626,
+      "in_process_p95_us": 10.75,
+      "worker_p95_us": 69.25,
+      "worker_over_in_process": 4.7735237814754825,
+      "in_process_ops_s": 134508.0911324597,
+      "worker_ops_s": 24082.12660205144
+    },
+    {
+      "name": "lifecycle_callback",
+      "in_process_p50_us": 7.291,
+      "worker_p50_us": 31.541,
+      "delta_p50_us": 24.25,
+      "in_process_p95_us": 13.625,
+      "worker_p95_us": 47.958,
+      "worker_over_in_process": 4.326018378823207,
+      "in_process_ops_s": 124829.34268488207,
+      "worker_ops_s": 29521.129202085507
+    },
+    {
+      "name": "burst_32_single_package",
+      "in_process_p50_us": 598.75,
+      "worker_p50_us": 1466.542,
+      "delta_p50_us": 867.7919999999999,
+      "in_process_p95_us": 740.958,
+      "worker_p95_us": 1775.5,
+      "worker_over_in_process": 2.449339457202505,
+      "in_process_ops_s": 52113.62862098724,
+      "worker_ops_s": 21261.1046832812
+    },
+    {
+      "name": "parallel_packages",
+      "in_process_p50_us": 620.416,
+      "worker_p50_us": 708.042,
+      "delta_p50_us": 87.62599999999998,
+      "in_process_p95_us": 720.8330000000001,
+      "worker_p95_us": 907.417,
+      "worker_over_in_process": 1.1412374922632555,
+      "in_process_ops_s": 50619.630947773025,
+      "worker_ops_s": 43658.31464007091
+    },
+    {
+      "name": "other_package_busy_20ms",
+      "in_process_p50_us": 16719.916,
+      "worker_p50_us": 186.208,
+      "delta_p50_us": -16533.708000000002,
+      "in_process_p95_us": 17101.25,
+      "worker_p95_us": 257.20799999999997,
+      "worker_over_in_process": 0.011136898056186405,
+      "in_process_ops_s": 59.6253690363153,
+      "worker_ops_s": 5342.794591453417
+    }
+  ],
+  "cold": {
+    "in_process_us": 193450.25,
+    "worker_us": 111571.083
+  },
+  "idle": [
+    {
+      "in_process": {
+        "cpu_ms": 0.194375,
+        "cpu_percent_one_core": 0.006474761851646928,
+        "footprint_bytes": 26313376,
+        "process_cpu_ms": [
+          0.194375
+        ],
+        "processes": [
+          {
+            "cpu_ns": 101438875,
+            "footprint_bytes": 26313376,
+            "rss_bytes": 53641216
+          }
+        ],
+        "rss_bytes": 53641216,
+        "wall_seconds": 3.002040916
+      },
+      "in_process_vm_incremental_rss_bytes": 41074688,
+      "parent_and_workers": {
+        "cpu_ms": 46.965584,
+        "cpu_percent_one_core": 1.564625283317251,
+        "footprint_bytes": 186962120,
+        "process_cpu_ms": [
+          1.168084,
+          12.52975,
+          12.351084,
+          11.079208,
+          9.837458
+        ],
+        "processes": [
+          {
+            "cpu_ns": 1642042375,
+            "footprint_bytes": 36700928,
+            "rss_bytes": 92094464
+          },
+          {
+            "cpu_ns": 1274646291,
+            "footprint_bytes": 40944480,
+            "rss_bytes": 107872256
+          },
+          {
+            "cpu_ns": 178581250,
+            "footprint_bytes": 36586360,
+            "rss_bytes": 90849280
+          },
+          {
+            "cpu_ns": 170001333,
+            "footprint_bytes": 36160376,
+            "rss_bytes": 90718208
+          },
+          {
+            "cpu_ns": 165244916,
+            "footprint_bytes": 36569976,
+            "rss_bytes": 90701824
+          }
+        ],
+        "rss_bytes": 472236032,
+        "wall_seconds": 3.0017145
+      }
+    },
+    {
+      "in_process": {
+        "cpu_ms": 0.227208,
+        "cpu_percent_one_core": 0.007568357860180083,
+        "footprint_bytes": 26296992,
+        "process_cpu_ms": [
+          0.227208
+        ],
+        "processes": [
+          {
+            "cpu_ns": 83516791,
+            "footprint_bytes": 26296992,
+            "rss_bytes": 53608448
+          }
+        ],
+        "rss_bytes": 53608448,
+        "wall_seconds": 3.002077917
+      },
+      "in_process_vm_incremental_rss_bytes": 41041920,
+      "parent_and_workers": {
+        "cpu_ms": 33.426165999999995,
+        "cpu_percent_one_core": 1.1135980500066818,
+        "footprint_bytes": 186683664,
+        "process_cpu_ms": [
+          0.936292,
+          9.654083,
+          8.865458,
+          6.893708,
+          7.076625
+        ],
+        "processes": [
+          {
+            "cpu_ns": 1682164750,
+            "footprint_bytes": 35996368,
+            "rss_bytes": 91963392
+          },
+          {
+            "cpu_ns": 1341025291,
+            "footprint_bytes": 40862632,
+            "rss_bytes": 107790336
+          },
+          {
+            "cpu_ns": 168590708,
+            "footprint_bytes": 36488056,
+            "rss_bytes": 90767360
+          },
+          {
+            "cpu_ns": 163051291,
+            "footprint_bytes": 36733840,
+            "rss_bytes": 90685440
+          },
+          {
+            "cpu_ns": 158559250,
+            "footprint_bytes": 36602768,
+            "rss_bytes": 90750976
+          }
+        ],
+        "rss_bytes": 471957504,
+        "wall_seconds": 3.001636542
+      }
+    },
+    {
+      "in_process": {
+        "cpu_ms": 0.177625,
+        "cpu_percent_one_core": 0.005917781730554277,
+        "footprint_bytes": 26346144,
+        "process_cpu_ms": [
+          0.177625
+        ],
+        "processes": [
+          {
+            "cpu_ns": 91171041,
+            "footprint_bytes": 26346144,
+            "rss_bytes": 53673984
+          }
+        ],
+        "rss_bytes": 53673984,
+        "wall_seconds": 3.001547
+      },
+      "in_process_vm_incremental_rss_bytes": 41123840,
+      "parent_and_workers": {
+        "cpu_ms": 38.989459,
+        "cpu_percent_one_core": 1.29905972625743,
+        "footprint_bytes": 186175688,
+        "process_cpu_ms": [
+          1.041958,
+          10.46825,
+          10.591917,
+          7.999084,
+          8.88825
+        ],
+        "processes": [
+          {
+            "cpu_ns": 1706322458,
+            "footprint_bytes": 36209360,
+            "rss_bytes": 92045312
+          },
+          {
+            "cpu_ns": 1361151208,
+            "footprint_bytes": 40092560,
+            "rss_bytes": 107626496
+          },
+          {
+            "cpu_ns": 168375708,
+            "footprint_bytes": 36651896,
+            "rss_bytes": 90800128
+          },
+          {
+            "cpu_ns": 170204750,
+            "footprint_bytes": 36701048,
+            "rss_bytes": 90832896
+          },
+          {
+            "cpu_ns": 167701916,
+            "footprint_bytes": 36520824,
+            "rss_bytes": 90832896
+          }
+        ],
+        "rss_bytes": 472137728,
+        "wall_seconds": 3.00136
+      }
+    }
+  ],
+  "codec": [
+    {
+      "payload_bytes": 0,
+      "p50_us": 1.542
+    },
+    {
+      "payload_bytes": 1024,
+      "p50_us": 2.125
+    },
+    {
+      "payload_bytes": 65536,
+      "p50_us": 37.333000000000006
+    }
+  ],
+  "notes": [
+    "Median of three release harness runs; fixture data cloning excluded from sequential latency.",
+    "In-process baseline reproduces the shared Bun thread/context handoff; identical handler functions on both paths.",
+    "Fresh VM startup and worker process startup are independent observations with warm OS caches, not full app launch measurements.",
+    "Idle CPU uses Mach tick conversion; parent_and_workers includes the otherwise idle baseline VM.",
+    "RSS includes shared pages; footprint is the OS physical-footprint counter.",
+    "Raw distributions were written to /tmp/chord-worker-bench-results/run-{1,2,3}.json."
+  ]
+}

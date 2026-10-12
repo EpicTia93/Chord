@@ -47,7 +47,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2.8"
 tauri-plugin-fs = "2.7.0"
 serde = { version = "1", features = [ "derive" ] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 shlex = "2"
 base64 = "0.23"
 tokio = { version = "1", features = [ "full" ] }

@@ -255,6 +255,7 @@ fn run_app_with_cli_command(startup_command: Option<tauri_app::scripting::CliApp
             exit_code = *code;
         }
         if let RunEvent::Exit = event {
+            bun_js::package_worker::shutdown_all();
             #[cfg(target_os = "macos")]
             if let Err(error) = dev_runtime::publish_exit(exit_code) {
                 log::error!("Failed to publish development app exit status: {error:#}");
@@ -291,4 +292,9 @@ pub async fn run_script_export(
     args: Vec<String>,
 ) -> anyhow::Result<()> {
     bun_js::run_standalone_export(path.as_ref(), export_name.into(), args).await
+}
+
+/// Internal package subprocess entry; callers must provide the parent's private IPC endpoint.
+pub async fn run_package_worker(address: String, token: String) -> anyhow::Result<()> {
+    bun_js::package_worker::serve(address, token).await
 }

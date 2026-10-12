@@ -132,20 +132,11 @@ pub fn resolve_logical_package_path(module_relpath: &Path, relative: &Path) -> R
 
 impl ChordJsPackageBuilder {
     pub async fn load(self, files: HashMap<FilePathslug, String>) -> Result<ChordJsPackage> {
-        use crate::bun_js::with_js;
-
-        let paths: Vec<String> = files
-            .keys()
-            .map(|pathslug| self.root.join(pathslug).to_string_lossy().into_owned())
-            .collect();
-        with_js(self.handle.clone(), move |ctx| {
-            Box::pin(async move {
-                for path in paths {
-                    ctx.evict_module(&path);
-                }
-                Ok(())
-            })
-        })
+        crate::bun_js::package_worker::reset_package(
+            self.handle.clone(),
+            self.name.clone(),
+            self.root.clone(),
+        )
         .await?;
 
         Ok(ChordJsPackage {

@@ -1,5 +1,5 @@
 use super::{ChordKeyboardEvent, SimulatedShortcut};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use typeshare::typeshare;
 
 /// The action that a chord can define.
@@ -70,13 +70,16 @@ pub struct EmitChordAction {
 }
 
 #[typeshare]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HandlerChordAction {
     /// Key in the JS engine's `__RUST_HANDLER_REGISTRY`.
     pub handler_id: String,
     #[typeshare(typescript(type = "any[]"))]
     pub event_args: Vec<toml::Value>,
+    /// Entered chord sequence, available as `this.input` in the handler.
+    #[serde(default)]
+    pub input: String,
     /// Persistent JavaScript values for this chord's current matching interval.
     pub sequence_id: Option<String>,
     pub assign_to: Option<String>,

@@ -211,7 +211,7 @@ mod tests {
     fn fixture(source: &str) -> ChordPackage {
         let parsed: ParsedChordsFile = source.parse().unwrap();
         let path = PathBuf::from("chords/dev/fixture/macos.toml");
-        let handlers = ["prepare", "down", "press", "up", "input"]
+        let handlers = ["prepare", "down", "press", "up", "input", "instagram"]
             .map(|event| CompiledChordsFileHandler {
                 event: event.into(),
                 handler_id: event.into(),
@@ -264,12 +264,38 @@ mod tests {
     }
 
     #[test]
+    fn story_input_tasks_preserve_the_sequence_and_resolve_capture_arguments() {
+        let package = fixture(
+            r#"
+name = "Instagram"
+[chords]
+'hs.(\d+)' = { '@input:instagram' = ['story', '$1'] }
+'hsr(\d+)' = { name = "Home: Stories > Reply @ #", '@input:instagram' = ['story', '$1'] }
+"#,
+        );
+        for input in ["hs.12", "hsr12"] {
+            let input_event = event(input);
+            let reference = package.resolve_chord_from_input_event(&input_event).unwrap();
+            let task = package.resolve_task(input_event, reference, 1).unwrap().unwrap();
+            let ChordTaskAction::Handler(action) = task.action else {
+                panic!("expected Instagram handler");
+            };
+            assert_eq!(action.handler_id, "instagram");
+            assert_eq!(action.input, input);
+            assert_eq!(action.event_args, vec!["story".into(), "12".into()]);
+        }
+        for input in ["hs,12", "xhsr12", "hsr12x", "hsr"] {
+            assert!(package.resolve_chord_from_input_event(&event(input)).is_none());
+        }
+    }
+
+    #[test]
     fn init_runs_once_until_mismatch_then_restarts_with_a_new_scope() {
         let package = fixture(
             r#"
 name = "fixture"
 [chords]
-'^j,(.*)$' = { '@init:prepare=state' = [], '@keydown:down=last' = ['$state', '$1'], '@keypress:press' = ['$last'], '@keyup:up' = ['$state'], '@input:input' = ['$state'] }
+'j,(.*)' = { '@init:prepare=state' = [], '@keydown:down=last' = ['$state', '$1'], '@keypress:press' = ['$last'], '@keyup:up' = ['$state'], '@input:input' = ['$state'] }
 "#,
         );
         let mut sequence = ChordSequence::default();

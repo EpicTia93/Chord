@@ -6,7 +6,7 @@ use macos::init_macos_observers;
 use nject::injectable;
 use objc2_app_kit::{NSRunningApplication, NSWorkspace, NSWorkspaceLaunchOptions};
 use objc2_foundation::NSString;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
@@ -95,7 +95,7 @@ impl DesktopAppManager {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObservedApp {
     pub pid: i32,

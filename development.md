@@ -118,6 +118,12 @@ The tests exercise signed executable/library isolation, generation leases,
 PID-safe signaling, and Launch Services output/shutdown. Rust's runtime-worker
 lease and permission-state tests are included in `cargo test --lib`.
 
+Compare isolated package workers with the previous in-process Bun runtime using
+`bun apps/chord-tauri/src-tauri/tests/package-isolation/benchmark.ts` from the root.
+It builds optimized binaries and records paired latency, throughput, startup, and
+resource measurements. See [the benchmark guide](./apps/chord-tauri/src-tauri/tests/package-isolation/README.md#performance-comparison)
+for cases, options, and interpretation.
+
 On macOS, a new development app launch replaces the running instance with the
 same development bundle identifier. Startup logs the previous PID, sends SIGTERM,
 and waits for it to exit before starting the new instance. If it ignores SIGTERM
@@ -226,7 +232,14 @@ bun run dev
 ```
 
 The runtime integration lives in `src-tauri/src/bun_js/` and exposes the
-`chord` module to packages. The CLI uses the same embedded runtime:
+`chord` module to packages. The desktop app supervises one child process per
+installed JavaScript package; it never executes package JavaScript or loads
+package native add-ons in the GUI process. The hidden `__package-worker` CLI
+command owns each persistent VM and its native UI event loop. State and keyboard
+host APIs use authenticated, bounded IPC. Crashed workers stay disabled until
+configuration reload; failed actions are not replayed. See the
+[isolation regression](apps/chord-tauri/src-tauri/tests/package-isolation/README.md).
+The CLI uses the same embedded runtime:
 
 ```sh
 target/debug/chord bun ./script.ts
