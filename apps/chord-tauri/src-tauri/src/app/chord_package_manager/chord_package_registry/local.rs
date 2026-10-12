@@ -72,19 +72,45 @@ impl LocalPackageRegistry {
             .clone())
     }
 
-    pub fn set_monorepo_packages(&self, source: &str, names: Vec<String>) -> anyhow::Result<()> {
+    pub fn set_monorepo_packages(
+        &self,
+        source: &str,
+        names: Vec<String>,
+    ) -> anyhow::Result<Option<Vec<String>>> {
         let root = self.monorepo_root(source)?;
         let available = super::import_monorepo_packages(&root)?;
         anyhow::ensure!(
             names.iter().all(|name| available.contains_key(name)),
             "Unknown monorepo package"
         );
+        self.save_monorepo_packages(source, Some(names))
+    }
+
+    /// Restore the exact saved selection even if a package disappeared during a failed reload.
+    pub(in crate::app::chord_package_manager) fn save_monorepo_packages(
+        &self,
+        source: &str,
+        names: Option<Vec<String>>,
+    ) -> anyhow::Result<Option<Vec<String>>> {
         let mut selections = self.monorepo_selections()?;
-        selections.insert(source.to_owned(), names);
+        let previous = match names {
+            Some(names) => selections.insert(source.to_owned(), names),
+            None => selections.remove(source),
+        };
         let store = self.sources_store()?;
+        let previous_value = store.get("monorepoSelections");
         store.set("monorepoSelections", serde_json::to_value(selections)?);
-        store.save()?;
-        Ok(())
+        if let Err(error) = store.save() {
+            // A failed save must not leave the picker reading an uncommitted selection.
+            match previous_value {
+                Some(value) => store.set("monorepoSelections", value),
+                None => {
+                    store.delete("monorepoSelections");
+                }
+            }
+            return Err(error.into());
+        }
+        Ok(previous)
     }
 
     pub fn list_monorepos(&self) -> anyhow::Result<Vec<String>> {

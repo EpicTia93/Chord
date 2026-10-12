@@ -8,10 +8,6 @@ pub async fn set_monorepo_packages(
 ) -> AppResult<()> {
     let handle = api.handle()?;
     let manager = handle.app_state().chord_package_manager();
-    manager
-        .registry
-        .local
-        .set_monorepo_packages(&source, names)?;
-    manager.reload_all().await?;
+    manager.set_monorepo_packages(&source, names).await?;
     Ok(())
 }

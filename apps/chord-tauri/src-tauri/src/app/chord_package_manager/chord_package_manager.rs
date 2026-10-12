@@ -102,8 +102,8 @@ file = "base.toml"
         .parse()
         .unwrap();
         let args = &base.handlers["command"].args;
-        let resolved = resolve_handler_args(args, &base, rustrover.imports[0].r#override.as_ref())
-            .unwrap();
+        let resolved =
+            resolve_handler_args(args, &base, rustrover.imports[0].r#override.as_ref()).unwrap();
         assert_eq!(
             resolved[0].as_str(),
             Some("/Applications/RustRover.app/Contents/MacOS/rustrover")
@@ -132,7 +132,156 @@ fn handler_ids(packages: &OrderMap<String, ChordPackage>) -> HashSet<String> {
         .collect()
 }
 
+fn parse_package_chords_file(path: &Path, contents: &str) -> Result<ParsedChordsFile> {
+    contents
+        .parse()
+        .with_context(|| format!("Failed to parse {}", path.display()))
+}
+
+fn ensure_selected_packages_loaded(
+    names: &[String],
+    package_errors: &HashMap<String, Vec<String>>,
+) -> Result<()> {
+    let mut errors = Vec::new();
+    for name in names {
+        match package_errors.get(name) {
+            Some(details) if details.is_empty() => {}
+            Some(details) => {
+                let mut details = details.clone();
+                details.sort();
+                errors.push(format!("Cannot enable {name}:\n{}", details.join("\n\n")));
+            }
+            None => errors.push(format!("Cannot enable {name}: package was not loaded")),
+        }
+    }
+    anyhow::ensure!(errors.is_empty(), "{}", errors.join("\n\n"));
+    Ok(())
+}
+
+#[cfg(test)]
+mod package_selection_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_chord_keys_report_the_file_and_reject_selection() {
+        let path = Path::new("chords/com/apple/systempreferences/macos.toml");
+        let contents = r#"
+name = "System Preferences"
+[chords]
+'/,' = { name = "System Preferences", shell = "open -b com.apple.systempreferences" }
+'gwa' = { name = "Goto: Wallpaper" }
+'gwa' = { name = "Goto: Wallet & Apple Pay" }
+"#;
+        let error = parse_package_chords_file(path, contents).unwrap_err();
+        let details = format!("{error:#}");
+        assert!(details.contains(&path.display().to_string()));
+        assert!(details.contains("duplicate key"));
+        assert!(details.contains("'gwa'"));
+        let name = "@keychord/chords-com.apple".to_owned();
+        let error = ensure_selected_packages_loaded(
+            std::slice::from_ref(&name),
+            &HashMap::from([(name.clone(), vec![details])]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(&format!("Cannot enable {name}")));
+        assert!(error.contains("duplicate key"));
+    }
+
+    #[test]
+    fn invalid_chord_definitions_are_reported_after_toml_parsing() {
+        let path = Path::new("chords/macos.toml");
+        let contents = r#"
+name = "Invalid handler"
+[on.input]
+file = 42
+"#;
+        // The raw representation accepts this TOML, but normalization rejects the handler.
+        toml::from_str::<RawChordsFile>(contents).unwrap();
+        let error = format!(
+            "{:#}",
+            parse_package_chords_file(path, contents).unwrap_err()
+        );
+        assert!(error.contains("chords/macos.toml"));
+        assert!(error.contains("handler must have the file key"));
+    }
+
+    #[test]
+    fn compilation_failures_reject_only_newly_selected_packages() {
+        let healthy = "@test/healthy".to_owned();
+        let broken = "@test/broken".to_owned();
+        let package_errors = HashMap::from([
+            (healthy.clone(), Vec::new()),
+            (
+                broken.clone(),
+                vec!["Failed to compile chords/macos.toml: JS default export did not resolve to a function: undefined".to_owned()],
+            ),
+        ]);
+        ensure_selected_packages_loaded(&[healthy], &package_errors).unwrap();
+        // Removing a broken package and ordinary reloads must remain possible.
+        ensure_selected_packages_loaded(&[], &package_errors).unwrap();
+        let error = ensure_selected_packages_loaded(&[broken], &package_errors)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("@test/broken"));
+        assert!(error.contains("chords/macos.toml"));
+        assert!(error.contains("JS default export"));
+    }
+
+    #[test]
+    fn missing_packages_cannot_be_accepted_as_loaded() {
+        let error = ensure_selected_packages_loaded(&["@test/missing".to_owned()], &HashMap::new())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "Cannot enable @test/missing: package was not loaded");
+    }
+
+    #[test]
+    fn valid_chords_can_be_loaded() {
+        let parsed = parse_package_chords_file(
+            Path::new("chords/macos.toml"),
+            "name = 'Valid'\n[chords]\n'/,' = { shell = 'open -b com.apple.systempreferences' }",
+        )
+        .unwrap();
+        assert_eq!(parsed.chords.len(), 1);
+        assert_eq!(parsed.chords[0].raw_trigger, "/,");
+    }
+}
+
 impl ChordPackageManager {
+    pub async fn set_monorepo_packages(&self, source: &str, names: Vec<String>) -> Result<()> {
+        // Keep selection changes and their rollback serialized with every other reload.
+        let _reload_guard = self.reload_lock.lock().await;
+        let previous = self
+            .registry
+            .local
+            .set_monorepo_packages(source, names.clone())?;
+        let newly_selected = names
+            .into_iter()
+            .filter(|name| !previous.as_ref().is_some_and(|names| names.contains(name)))
+            .collect::<Vec<_>>();
+
+        if let Err(error) = self.reload_once(&newly_selected).await {
+            self.registry
+                .local
+                .save_monorepo_packages(source, previous)
+                .map_err(|restore_error| {
+                    anyhow::anyhow!(
+                        "{error:#}\n\nFailed to restore package selection: {restore_error:#}"
+                    )
+                })?;
+            // Compilation can register JS handlers and lifecycle callbacks. Rebuild the old
+            // selection to clean up those registrations as well as package roots.
+            self.reload_once(&[]).await.map_err(|restore_error| {
+                anyhow::anyhow!(
+                    "{error:#}\n\nFailed to reload previous package selection: {restore_error:#}"
+                )
+            })?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub async fn reload_all(&self) -> Result<()> {
         let request = self.reload_requested.fetch_add(1, Ordering::SeqCst) + 1;
         let _reload_guard = self.reload_lock.lock().await;
@@ -145,7 +294,7 @@ impl ChordPackageManager {
         // during the reload will be handled by one trailing caller instead of creating a queue of
         // complete reloads.
         let generation = self.reload_requested.load(Ordering::SeqCst);
-        let result = self.reload_once().await;
+        let result = self.reload_once(&[]).await;
         *self.last_reload_error.lock() = result.as_ref().err().map(|error| format!("{error:#}"));
         self.reload_completed.store(generation, Ordering::SeqCst);
         result
@@ -158,7 +307,7 @@ impl ChordPackageManager {
         }
     }
 
-    async fn reload_once(&self) -> Result<()> {
+    async fn reload_once(&self, required_packages: &[String]) -> Result<()> {
         let raw_chord_packages = self.registry.import_all_packages()?;
         let previous_roots = self.package_roots.read().clone();
         let previous_handler_ids = handler_ids(&self.packages.read());
@@ -174,21 +323,27 @@ impl ChordPackageManager {
         *self.package_roots.write() = loading_roots;
 
         let mut chord_packages = OrderMap::new();
+        let mut package_errors = HashMap::new();
         for (package_name, raw_chord_package) in raw_chord_packages {
-            if let Ok(package) = self
-                .load_package(raw_chord_package)
-                .await
-                .inspect_err(|error| {
+            match self.load_package(raw_chord_package).await {
+                Ok((package, errors)) => {
+                    package_errors.insert(package_name, errors);
+                    chord_packages.insert(package.name.clone(), package);
+                }
+                Err(error) => {
                     log::error!(
                         "skipping package {} because of loading error: {:?}",
                         package_name,
                         error
-                    )
-                })
-            {
-                chord_packages.insert(package.name.clone(), package);
-            };
+                    );
+                    package_errors.insert(package_name, vec![format!("{error:#}")]);
+                }
+            }
         }
+
+        // Ordinary reloads retain usable files from partially broken packages. A newly
+        // selected package must load completely before its selection can be accepted.
+        ensure_selected_packages_loaded(required_packages, &package_errors)?;
 
         let next_handler_ids = handler_ids(&chord_packages);
         let retained_handler_ids = previous_handler_ids
@@ -239,7 +394,10 @@ impl ChordPackageManager {
             .map(|(name, root)| (name.clone(), root.clone()))
     }
 
-    pub async fn load_package(&self, raw_chord_package: RawChordPackage) -> Result<ChordPackage> {
+    async fn load_package(
+        &self,
+        raw_chord_package: RawChordPackage,
+    ) -> Result<(ChordPackage, Vec<String>)> {
         let name = raw_chord_package.package_name();
         log::debug!("loading package {}", name);
         let root = raw_chord_package.root.clone();
@@ -248,33 +406,28 @@ impl ChordPackageManager {
         let mut compiled_chords_files = HashMap::new();
         let mut global_chords = Vec::new();
         let mut parsed_chords_files = HashMap::new();
+        let mut errors = Vec::new();
 
         for (path, contents) in raw_chord_package.chords_files_contents {
-            let Ok(raw_chords_file) = toml::from_str::<RawChordsFile>(&contents).inspect_err(|e| {
-                log::error!(
-                    "error when loading package {}; failed to parse raw chords file {}:\n{}",
-                    name,
-                    e,
-                    contents
-                );
-            }) else {
+            let Ok(raw) = toml::from_str::<RawChordsFile>(&contents)
+                .with_context(|| format!("Failed to parse {}", path.display()))
+                .inspect_err(|error| {
+                    log::error!("error when loading package {name}: {error:#}");
+                    errors.push(format!("{error:#}"));
+                })
+            else {
                 continue;
             };
-
-            raw_chords_files.insert(path.clone(), raw_chords_file);
-
-            let Ok(parsed_chords_file) = contents.parse::<ParsedChordsFile>().inspect_err(|e| {
-                log::error!(
-                    "error when loading package {}; failed to parse chords file {}:\n{}",
-                    name,
-                    e,
-                    contents
-                );
-            }) else {
-                continue;
-            };
-
-            parsed_chords_files.insert(path, parsed_chords_file);
+            raw_chords_files.insert(path.clone(), raw);
+            match parse_package_chords_file(&path, &contents) {
+                Ok(parsed) => {
+                    parsed_chords_files.insert(path, parsed);
+                }
+                Err(error) => {
+                    log::error!("error when loading package {name}: {error:#}");
+                    errors.push(format!("{error:#}"));
+                }
+            }
         }
 
         let js_package = self
@@ -336,6 +489,7 @@ impl ChordPackageManager {
                         name,
                         e
                     );
+                    errors.push(format!("Failed to compile {}: {e:#}", pathslug.display()));
                 }
             }
         }
@@ -348,7 +502,7 @@ impl ChordPackageManager {
             global_chords,
         };
 
-        Ok(chord_package)
+        Ok((chord_package, errors))
     }
 
     async fn load_js_package(
@@ -488,7 +642,9 @@ impl ChordPackageManager {
                         .iter()
                         .find(|c| {
                             c.trigger.matches(&event.input)
-                                && c.actions.iter().any(|a| a.trigger() == ChordEventTrigger::Input)
+                                && c.actions
+                                    .iter()
+                                    .any(|a| a.trigger() == ChordEventTrigger::Input)
                         })
                         .is_some()
                     {
@@ -504,7 +660,10 @@ impl ChordPackageManager {
                 .iter()
                 .find(|c| {
                     c.chord.trigger.matches(&event.input)
-                        && c.chord.actions.iter().any(|a| a.trigger() == ChordEventTrigger::Input)
+                        && c.chord
+                            .actions
+                            .iter()
+                            .any(|a| a.trigger() == ChordEventTrigger::Input)
                 })
                 .is_some()
             {

@@ -25,7 +25,7 @@ export function MonorepoPackagePicker({ source, disabled = false }: { source: st
           {name}
         </label>
       ))}
-      {error && <p role="alert" className="text-sm text-destructive">{typeof error === "object" && "Message" in error ? String(error.Message) : String(error)}</p>}
+      {error && <p role="alert" className="whitespace-pre-wrap break-words text-sm text-destructive">{typeof error === "object" && "Message" in error ? String(error.Message) : String(error)}</p>}
     </fieldset>
   );
 }

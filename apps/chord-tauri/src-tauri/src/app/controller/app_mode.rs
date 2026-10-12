@@ -1,5 +1,5 @@
 use crate::app::AppHandleExt;
-use crate::models::{Key, KeyEvent};
+use crate::models::{CapturedKeyEvent, Key, KeyEvent};
 use crate::state::{AppModeObservable, AppModeState, Observable};
 use anyhow::Result;
 use atomic_enum::atomic_enum;
@@ -42,7 +42,8 @@ impl AppController {
     }
 
 
-    pub fn handle_key_event(&self, key_event: &KeyEvent) -> Result<()> {
+    pub fn handle_key_event(&self, input: &CapturedKeyEvent) -> Result<()> {
+        let key_event = &input.event;
         let app_mode = self.app_mode();
         log::debug!("handling key event in {app_mode} mode");
 
@@ -56,9 +57,7 @@ impl AppController {
                 }
             }
             AppMode::Idle => {
-                let keyboard_state = self.handle.app_state().keyboard().state();
-                if key_event == &KeyEvent::Press(Key(KeyMappingCode::Space)) &&
-                    keyboard_state.is_caps_pressed() {
+                if input.activates_chord_mode() {
                     self.set_chord_mode()?;
                     self.handle.app_state().keyboard().on_chord_mode_activated();
                 }

@@ -5,7 +5,7 @@ use super::secure_input::SecureInputState;
 use super::tap::{TapEvent, TapHandle};
 use crate::app::AppHandleExt;
 use crate::app::permissions::{InputMonitoringAccess, InputPermissions};
-use crate::models::{AppKeyboardState, Key, KeyEvent, KeyEventAction};
+use crate::models::{AppKeyboardState, CapturedKeyEvent, Key, KeyEvent, KeyEventAction};
 use anyhow::Result;
 use bitflags::bitflags;
 use keycode::KeyMappingCode;
@@ -96,9 +96,6 @@ impl AppKeyboard {
     /// Chord mode was entered with Caps+Space: put the OS Caps Lock toggle
     /// back to what it was before the Caps press. Called by the controller.
     pub fn on_chord_mode_activated(&self) {
-        if !self.keyboard_state.is_caps_pressed() {
-            return;
-        }
         let before = self.caps_lock_restore.chord_activated();
         self.restore_caps_lock(before);
     }
@@ -298,7 +295,7 @@ impl AppKeyboard {
 
     /// Creates the tap and the thread that runs the controller for its events.
     fn spawn_tap(&self) -> Result<TapHandle> {
-        let (tx, rx) = sync_channel::<(u64, KeyEvent)>(KEY_EVENT_QUEUE_CAPACITY);
+        let (tx, rx) = sync_channel::<(u64, CapturedKeyEvent)>(KEY_EVENT_QUEUE_CAPACITY);
         let handle = self.handle.clone();
         // Keeping the tap callback minimal: controller work runs here instead.
         std::thread::Builder::new()
@@ -334,8 +331,12 @@ impl AppKeyboard {
                             return KeyEventAction::Consume;
                         }
                     };
-                    let action = keyboard.handle_key_event(&event);
-                    match tx.try_send((generation, event)) {
+                    let input = CapturedKeyEvent {
+                        event,
+                        caps_pressed: keyboard.state().is_caps_pressed(),
+                    };
+                    let action = keyboard.handle_key_event(&input);
+                    match tx.try_send((generation, input)) {
                         Ok(()) => {}
                         Err(TrySendError::Full(_)) => {
                             if !queue_full_reported {
@@ -378,9 +379,16 @@ impl AppKeyboard {
                         .app_state()
                         .dev_lockfile_detector()
                         .with_current_input_owner(|_generation| {
-                            handle.app_state().keyboard().handle_key_event(&event);
-                            if let Err(error) =
-                                handle.app_state().app_controller().handle_key_event(&event)
+                            // HID already mirrors the latest physical state. Do not
+                            // overwrite it by replaying an older queued Caps event.
+                            handle.app_state().keyboard().handle_caps_event(&event);
+                            if let Err(error) = handle
+                                .app_state()
+                                .app_controller()
+                                .handle_key_event(&CapturedKeyEvent {
+                                    event,
+                                    caps_pressed: pressed,
+                                })
                             {
                                 log::error!("Failed to handle Caps Lock event: {error:#}");
                             }
@@ -461,13 +469,27 @@ impl AppKeyboard {
     /// Updates the tracked keyboard state and decides whether the event
     /// reaches other applications. Runs on the listener threads, so it must
     /// stay cheap.
-    fn handle_key_event(&self, event: &KeyEvent) -> KeyEventAction {
+    fn handle_key_event(&self, input: &CapturedKeyEvent) -> KeyEventAction {
+        let event = &input.event;
         log::debug!("Processing event {event:?}");
         self.keyboard_state.handle_key_event(event);
         self.update_modifier_flags(event);
 
         let app_mode = self.handle.app_state().app_controller().app_mode();
 
+        // Space while Caps is held enters Chord mode and is never typed.
+        if input.activates_chord_mode() {
+            return KeyEventAction::Consume;
+        }
+
+        if app_mode.is_chord() {
+            return KeyEventAction::Consume;
+        }
+
+        KeyEventAction::Forward
+    }
+
+    fn handle_caps_event(&self, event: &KeyEvent) {
         // A plain Caps press toggles Caps Lock as usual. Only a press that
         // activates Chord mode (see `on_chord_mode_activated`) restores the
         // toggle; the release restores it once more because the OS toggle
@@ -483,19 +505,6 @@ impl AppKeyboard {
             }
             _ => {}
         }
-
-        // Space while Caps is held enters Chord mode and is never typed.
-        if event == &KeyEvent::Press(Key(KeyMappingCode::Space))
-            && self.keyboard_state.is_caps_pressed()
-        {
-            return KeyEventAction::Consume;
-        }
-
-        if app_mode.is_chord() {
-            return KeyEventAction::Consume;
-        }
-
-        KeyEventAction::Forward
     }
 
     #[allow(dead_code)]
