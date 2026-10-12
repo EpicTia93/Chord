@@ -1,11 +1,12 @@
 fn main() {
     // Packages keep prebuilt Node-API modules under `target/<triple>/...`; the `chord`
-    // module's `resolveNativeModulePath` needs the app's triple to pick the right subtree.
+    // `import.meta.chord.resolveNative` needs the app's triple to pick the right subtree.
     println!(
         "cargo:rustc-env=CHORD_TARGET_TRIPLE={}",
         std::env::var("TARGET").expect("cargo sets TARGET")
     );
     println!("cargo:rerun-if-changed=native/hid.c");
+    println!("cargo:rerun-if-changed=native/hid.h");
     println!("cargo:rerun-if-changed=native/caps.c");
     println!("cargo:rerun-if-changed=../data/*");
 

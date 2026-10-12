@@ -8,9 +8,11 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+.jj/
 dist
 dist-ssr
 **/target/
+apps/chord-tauri/src-tauri/tests/native-async/.build/
 *.local
 
 # Editor directories and files

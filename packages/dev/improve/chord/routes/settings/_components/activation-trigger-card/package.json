@@ -11,10 +11,10 @@
 	"dependencies": {
 		"@chord/dev.improve.chord.components.ui.card": "workspace:*",
 		"@chord/dev.improve.chord.routes.settings._components.shortcut-keys": "workspace:*",
-		"react": "^19.2.8"
+		"react": "^19.3.0"
 	},
 	"devDependencies": {
-		"@types/react": "^19.2.18",
-		"@types/react-dom": "^19.2.5"
+		"@types/react": "^19.3.0",
+		"@types/react-dom": "^19.3.0"
 	}
 }

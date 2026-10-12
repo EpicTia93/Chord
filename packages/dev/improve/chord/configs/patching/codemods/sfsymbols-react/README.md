@@ -1,5 +1,9 @@
 # sfsymbols-react remove Next.js dependency patch
 
+Chord now uses SF Symbols 8.1.3, which no longer declares Next.js as a dependency.
+The Bun patch and its `patchedDependencies` entry have been removed. This codemod
+and its fixtures remain available for older versions that need the patch.
+
 JSSG codemod that patches `@bradleyhodges/sfsymbols-react` to remove the unused `next` entry from `package.json` `dependencies`. Chord uses the package for SF Symbol icons in a Tauri + Vite app and never runs Next.js.
 
 ## Why the patch exists
@@ -28,11 +32,13 @@ codemod.ts        # JSSG transformation
 @fixtures/        # JSSG fixture pairs (input.json / expected.json)
 ```
 
-This is an **npm package** patch applied automatically via Bun `patchedDependencies`.
+For versions that need it, this is an **npm package** patch applied via Bun
+`patchedDependencies`.
 
 ## Regenerate the Bun patch file
 
-When `@bradleyhodges/sfsymbols-react` is upgraded, re-apply the codemod and commit a fresh patch:
+If an older version of `@bradleyhodges/sfsymbols-react` is required, inspect its
+dependencies before re-applying the codemod and committing a fresh patch:
 
 ```sh
 bun patch @bradleyhodges/sfsymbols-react@<version>

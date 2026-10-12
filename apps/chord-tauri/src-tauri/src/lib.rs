@@ -64,8 +64,14 @@ fn run_app_with_cli_command(startup_command: Option<tauri_app::scripting::CliApp
         let _ = writeln!(stderr, "PANIC: {info}");
         let _ = writeln!(stderr, "{bt}");
 
-        log::error!("PANIC: {info}");
-        log::error!("{bt}");
+        // Logging from inside the panic hook must never itself panic: a second
+        // panic while unwinding the first aborts the process (SIGABRT). Even with
+        // an infallible stdout target, a custom `Dispatch` target or a future
+        // logger change could panic, so contain it here as well.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            log::error!("PANIC: {info}");
+            log::error!("{bt}");
+        }));
     }));
 
     // https://github.com/Narsil/rdev/issues/165#issuecomment-2907684547
@@ -117,7 +123,7 @@ fn run_app_with_cli_command(startup_command: Option<tauri_app::scripting::CliApp
         })
         .targets([
             logging::history_target(),
-            Target::new(TargetKind::Stdout),
+            logging::stdout_target(),
             Target::new(TargetKind::LogDir {
                 file_name: Some("chords".into()),
             }),

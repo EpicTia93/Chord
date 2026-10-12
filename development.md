@@ -1,5 +1,68 @@
 # Development
 
+## Version control
+
+Chord uses Jujutsu (`jj`) in a colocated Git checkout, following Haniverse's
+workflow with `dev` as the integration bookmark. Existing Git history and remotes
+are reused. Install `jj` on macOS with `brew install jj`, then initialize each new
+checkout from the repository root:
+
+```sh
+jj git init --colocate
+jj config edit --repo
+```
+
+Add the following repository-local configuration. It overrides Haniverse's
+user-level `trunk` aliases only for Chord; user identity and other user settings
+are inherited.
+
+```toml
+[revset-aliases]
+'trunk()' = 'dev@origin'
+
+[aliases]
+gf = ["git", "fetch"]
+pull = ["util", "exec", "--", "bash", "-c", """
+set -e
+jj git fetch
+jj bookmark set dev -r dev@origin --allow-backwards
+jj rebase -d dev
+"""]
+push = ["util", "exec", "--", "bash", "-c", """
+set -e
+target=$(jj log --no-graph -r 'heads(::@ & mutable() & ~description(exact:"") & ~empty())' -T 'commit_id' 2>/dev/null || true)
+if [ -z "$target" ]; then
+  echo "error: nothing to push (no described, non-empty commit on this branch)" >&2
+  exit 1
+fi
+jj bookmark move dev --to "$target"
+exec jj git push -b dev "$@"
+""", "bash"]
+```
+
+Track the integration bookmark once:
+
+```sh
+jj bookmark track dev --remote origin
+```
+
+Everyday commands:
+
+```sh
+jj st
+jj --no-pager diff --git
+jj --no-pager log
+jj describe -m "Describe the change"
+jj push       # advance dev to the latest described, non-empty change and push
+jj pull       # fetch origin, update dev, and rebase onto it
+```
+
+Changes are snapshotted automatically; there is no staging area. `jj push` skips
+empty or undescribed changes and forwards options such as `--dry-run` to
+`jj git push`. `jj pull` rebases the working copy, so run it when shared work is
+ready to move. The agent workflow is documented in
+[the jujutsu skill](./.agents/skills/jujutsu/SKILL.md).
+
 ## Toolchain
 
 Chord uses [proto](https://moonrepo.dev/proto) to install the versions of Bun and Rust pinned for the repository.

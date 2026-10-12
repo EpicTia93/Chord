@@ -249,7 +249,7 @@ impl LocalPackageRegistry {
         let package_json_contents = fs::read_to_string(root.join("package.json")).ok();
 
         // Native modules under `target/` are not read: the package's own JS loads them from
-        // disk with `process.dlopen` (see the `chord` module's `resolveNativeModulePath`).
+        // disk with `process.dlopen` (see `import.meta.chord.resolveNative`).
         for dir in ["chords", "js", "bin"] {
             let dir_path = root.join(dir);
             if !dir_path.exists() {

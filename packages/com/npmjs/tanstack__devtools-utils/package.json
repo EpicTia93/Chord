@@ -5,6 +5,6 @@
     "./react": "./+react.ts"
   },
   "dependencies": {
-    "@tanstack/devtools-utils-original": "npm:@tanstack/devtools-utils@^0.7.0"
+    "@tanstack/devtools-utils-original": "npm:@tanstack/devtools-utils@^0.7.1"
   }
 }

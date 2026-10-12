@@ -136,7 +136,7 @@
     "@chord/dev.improve.chord.lib.typeshare": "workspace:*"
   },
   "devDependencies": {
-    "vite-plus": "^0.3.0"
+    "vite-plus": "^1.1.0"
   },
   "overrides": {
     "@tanstack/devtools-client": "workspace:packages/com/npmjs/tanstack__devtools-client",
@@ -147,8 +147,5 @@
     "@tanstack/react-router-devtools": "workspace:packages/com/npmjs/tanstack__react-router-devtools",
     "@tanstack/router-plugin": "workspace:packages/com/npmjs/tanstack__router-plugin"
   },
-  "packageManager": "bun@1.4.2",
-  "patchedDependencies": {
-    "@bradleyhodges/sfsymbols-react@7.0.4": "patches/@bradleyhodges%2Fsfsymbols-react@7.0.4.patch"
-  }
+  "packageManager": "bun@1.4.2"
 }

@@ -6,7 +6,7 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: [.library(name: "AsyncProbe", type: .dynamic, targets: ["AsyncProbe"])],
     dependencies: [
-        .package(url: "https://github.com/kabiroberai/node-swift.git", exact: "1.5.1"),
+        .package(url: "https://github.com/kabiroberai/node-swift.git", exact: "1.5.2"),
     ],
     targets: [
         .target(name: "AsyncProbe", dependencies: [

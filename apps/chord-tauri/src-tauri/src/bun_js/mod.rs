@@ -169,6 +169,9 @@ async fn build_engine(handle: Option<AppHandle>) -> anyhow::Result<BunEngine> {
     rt.set_max_stack_size(1024 * 1024).await;
     rt.set_loader((ModuleResolver::new(),), (ModuleLoader::new(),))
         .await;
+    // Attach `import.meta.chord` to every module loaded from disk. Installed before any
+    // handler is imported, since JSC materializes a module's `import.meta` once.
+    chord_module::install_import_meta_hook(&rt).await;
 
     let context = AsyncContext::full(&rt).await?;
     async_with!(context => |ctx| {

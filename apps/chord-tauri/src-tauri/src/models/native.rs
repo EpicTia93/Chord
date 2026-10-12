@@ -1,7 +1,7 @@
 //! Layout of a chord package's prebuilt Node-API modules.
 //!
 //! A package's JS handler loads these through Bun's `process.dlopen`, and the `chord` module's
-//! `resolveNativeModulePath(import.meta, relpath)` applies this layout so packages do not hardcode
+//! `import.meta.chord.resolveNative(relpath)` applies this layout so packages do not hardcode
 //! target triples. Example: `src/swift/menu/menu.swift` -> `target/<triple>/menu/menu.node`.
 use std::path::{Component, Path, PathBuf};
 

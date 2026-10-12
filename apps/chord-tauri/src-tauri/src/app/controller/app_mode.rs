@@ -59,7 +59,8 @@ impl AppController {
                 let keyboard_state = self.handle.app_state().keyboard().state();
                 if key_event == &KeyEvent::Press(Key(KeyMappingCode::Space)) &&
                     keyboard_state.is_caps_pressed() {
-                    self.set_chord_mode();
+                    self.set_chord_mode()?;
+                    self.handle.app_state().keyboard().on_chord_mode_activated();
                 }
             }
         }

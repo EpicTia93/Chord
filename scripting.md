@@ -23,9 +23,18 @@ export class Applescript {
 }
 
 export function setAppNeedsRelaunch(bundleId: string, needsRelaunch: boolean): void;
+```
 
-export function resolveNativeModulePath(meta: ImportMeta, relpath: string): string;
-export function resolvePackageFile(meta: ImportMeta, path: string): string;
+Chord also attaches a namespace to every module it loads, so path resolution is bound to the
+calling module rather than passed in:
+
+```ts
+interface ImportMeta {
+  chord: {
+    resolveNative(relpath: string): string;
+    resolvePackageFile(path: string): string;
+  };
+}
 ```
 
 This marks or clears an app in the settings UI and gives the user a one-click relaunch button.
@@ -161,18 +170,16 @@ enum BeepError: Error {
 ])
 ```
 
-The handler resolves the add-on through the `chord` module—never with a hardcoded target triple—and loads it with Bun's Node-compatible `process.dlopen`:
+The handler resolves the add-on through `import.meta.chord`—never with a hardcoded target triple—and loads it with Bun's Node-compatible `process.dlopen`:
 
 ```ts
 // src/js/beep.ts
-import { resolveNativeModulePath } from "chord";
-
 type BeepAddon = { beep(times: number): void };
 let addon: BeepAddon | undefined;
 
 function openAddon(): BeepAddon {
   const module = { exports: {} as BeepAddon };
-  process.dlopen(module, resolveNativeModulePath(import.meta, "beep"));
+  process.dlopen(module, import.meta.chord.resolveNative("beep"));
   return module.exports;
 }
 
@@ -184,7 +191,7 @@ export default function build(times = 1) {
 }
 ```
 
-- `resolveNativeModulePath(import.meta, "beep")` returns the absolute path of `target/<Chord's triple>/beep/beep.node` for the calling module's package, including when the package is vendored inside another one. `resolvePackageFile(import.meta, "any/relative/path")` does the same for arbitrary package files.
+- `import.meta.chord.resolveNative("beep")` returns the absolute path of `target/<Chord's triple>/beep/beep.node` for the calling module's package, including when the package is vendored inside another one. `import.meta.chord.resolvePackageFile("any/relative/path")` does the same for arbitrary package files. Both are bound to the module they are read from, so a module can only resolve paths within its own package.
 - Handlers run on Chord's JavaScript worker thread. On macOS, both the desktop app and the `bun` / `run` CLI commands service the main run loop, so native add-ons can use Swift's `@MainActor`. Export an async NodeSwift function and use `try await MainActor.run { ... }` for main-thread operations. NodeSwift returns a JavaScript Promise; return or await that Promise from your handler so Chord waits for completion and reports errors. Keep NodeAPI values on `@NodeActor`, passing Swift values across to `@MainActor`. The CLI services main-thread work without creating the desktop UI; app-only `chord` APIs still require the app.
 - A thrown Swift error is reported as a JavaScript handler error. A crash in native code (`fatalError`, a bad pointer, `exit()`) takes Chord down with it—there is no separate process—so keep the exported surface small and validate inputs.
 - Once opened, an add-on stays loaded until Chord quits; reloading packages picks up changed JavaScript, but a rebuilt `.node` file needs a restart.
@@ -236,7 +243,7 @@ Any other build system works too: Chord only cares that `target/<triple>/<path>/
 
 ## Testing without the app
 
-A Chord build's CLI runs a script on the same embedded Bun, with the `chord` module available (`resolveNativeModulePath` anchors on the nearest `package.json`):
+A Chord build's CLI runs a script on the same embedded Bun, with the `chord` module available (`import.meta.chord.resolveNative` anchors on the nearest `package.json`):
 
 ```sh
 chord bun scripts/run.ts by-letters f     # from the chords-menu checkout

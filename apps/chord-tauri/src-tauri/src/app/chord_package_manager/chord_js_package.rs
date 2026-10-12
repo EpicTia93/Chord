@@ -98,7 +98,7 @@ impl ChordJsPackage {
 /// at `js/@scope/name/js/menu.js` belongs to the vendored package `@scope/name`, whose folders
 /// were copied to `js/@scope/name`, `chords/@scope/name` and `target/@scope/name` — so its
 /// `target/x` is `target/@scope/name/target/x`. This is what the `chord` module's
-/// `resolvePackageFile(import.meta, path)` applies.
+/// `import.meta.chord.resolvePackageFile(path)` applies.
 pub fn resolve_logical_package_path(module_relpath: &Path, relative: &Path) -> Result<PathBuf> {
     anyhow::ensure!(
         relative.is_relative()

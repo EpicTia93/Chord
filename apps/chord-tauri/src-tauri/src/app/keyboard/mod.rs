@@ -4,4 +4,8 @@ pub use app::*;
 mod keyboard;
 pub use keyboard::*;
 
-mod registration;
+mod caps_listener;
+mod caps_lock_restore;
+pub mod health;
+mod secure_input;
+mod tap;

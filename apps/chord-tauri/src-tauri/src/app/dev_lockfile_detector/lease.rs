@@ -55,11 +55,12 @@ impl InputLease {
 
     /// `changed(false)` quiesces input before unlock. All eligible dev instances
     /// share the priority lock, but only one instance can own input.
+    /// Returns whether this process owns input after the refresh.
     pub(super) fn refresh(
         &mut self,
         eligible: bool,
         mut changed: impl FnMut(bool),
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
         let wants_input = if !eligible {
             false
         } else if self.is_development {
@@ -86,7 +87,7 @@ impl InputLease {
             self.owns_input = true;
             changed(true);
         }
-        Ok(())
+        Ok(self.owns_input)
     }
 }
 

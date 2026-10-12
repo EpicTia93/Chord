@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "jujutsu": {
+      "source": "danverbraganza/jujutsu-skill",
+      "sourceType": "github",
+      "skillPath": "jujutsu/SKILL.md",
+      "computedHash": "d5ae0fd9783e692d44f6f10da6cc5076c0f94e7a301c99f7b30ac5f67d2f07ba"
+    }
+  }
+}

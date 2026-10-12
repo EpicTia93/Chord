@@ -1,26 +1,20 @@
-use crate::app::AppHandleExt;
-use crate::app::state::AppSingleton;
 use crate::state::{AppPermissionsObservable, AppPermissionsState, Observable};
 use anyhow::{Context, Result};
 use nject::injectable;
-use std::sync::Arc;
 use std::sync::mpsc;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_autostart::ManagerExt;
 
 #[injectable]
 pub struct AppPermissions {
-    input_monitoring: AppPermissionsInputMonitoring,
-    accessibility: AppPermissionsAccessibility,
-
     observable: AppPermissionsObservable,
     handle: AppHandle,
 }
 
 impl AppPermissions {
     pub(super) fn init(&self) -> Result<()> {
-        self.input_monitoring.init(&self.observable)?;
-        self.accessibility.init(&self.observable)?;
+        // The input supervisor (`AppKeyboard`) polls `refresh_if_changed` and
+        // owns listener registration; nothing to subscribe to here.
         Ok(())
     }
 
@@ -31,17 +25,37 @@ impl AppPermissions {
         })
     }
 
+    /// Queries macOS directly: `(accessibility, input_monitoring)`.
+    pub fn check_now() -> (bool, bool) {
+        (
+            macos_accessibility_client::accessibility::application_is_trusted(),
+            input_monitoring_granted(),
+        )
+    }
+
+    /// Re-checks both permissions and publishes them only when they changed.
+    /// Cheap enough to poll: both calls are local TCC lookups.
+    pub fn refresh_if_changed(&self) -> Result<(bool, bool)> {
+        let (accessibility, input_monitoring) = Self::check_now();
+        let previous = self.observable.get_state()?;
+        let changed = previous.is_accessibility_enabled != Some(accessibility)
+            || previous.is_input_monitoring_enabled != Some(input_monitoring);
+        if changed {
+            log::info!(
+                "Permissions: accessibility={accessibility} input_monitoring={input_monitoring} (executable {:?})",
+                std::env::current_exe().ok()
+            );
+            self.observable.set_state(|prev| AppPermissionsState {
+                is_input_monitoring_enabled: Some(input_monitoring),
+                is_accessibility_enabled: Some(accessibility),
+                ..prev
+            })?;
+        }
+        Ok((accessibility, input_monitoring))
+    }
+
     pub async fn load(&self) -> Result<(bool, bool)> {
-        let is_input_monitoring_enabled =
-            tauri_plugin_macos_permissions::check_input_monitoring_permission().await;
-        let is_accessibility_enabled =
-            tauri_plugin_macos_permissions::check_accessibility_permission().await;
-        self.observable.set_state(|prev| AppPermissionsState {
-            is_input_monitoring_enabled: Some(is_input_monitoring_enabled),
-            is_accessibility_enabled: Some(is_accessibility_enabled),
-            ..prev
-        })?;
-        Ok((is_accessibility_enabled, is_input_monitoring_enabled))
+        self.refresh_if_changed()
     }
 
     pub fn toggle_autostart(&self) -> Result<()> {
@@ -62,48 +76,6 @@ impl AppPermissions {
                 ..prev
             })?;
         }
-        Ok(())
-    }
-}
-
-#[injectable]
-pub struct AppPermissionsInputMonitoring {
-    handle: AppHandle,
-    app_permissions_observable: AppPermissionsObservable,
-}
-
-impl AppPermissionsInputMonitoring {
-    pub fn init(&self, observable: &AppPermissionsObservable) -> Result<()> {
-        let handle = self.handle.clone();
-        observable.subscribe(Arc::new(move |_previous_state, state| {
-            if state.is_input_monitoring_enabled == Some(true) {
-                let keyboard = handle.app_state().keyboard();
-                if let Err(e) = keyboard.register_caps_lock_input_handler() {
-                    log::error!("Failed to handle caps lock input: {e}");
-                }
-            }
-        }))?;
-        Ok(())
-    }
-}
-
-#[injectable]
-pub struct AppPermissionsAccessibility {
-    handle: AppHandle,
-    app_permissions_observable: AppPermissionsObservable,
-}
-
-impl AppPermissionsAccessibility {
-    pub fn init(&self, observable: &AppPermissionsObservable) -> Result<()> {
-        let handle = self.handle.clone();
-        observable.subscribe(Arc::new(move |_previous_state, state| {
-            if state.is_accessibility_enabled == Some(true) {
-                let keyboard = handle.app_state().keyboard();
-                if let Err(error) = keyboard.register_input_handler() {
-                    log::error!("Failed to register keyboard input: {error:#}");
-                }
-            }
-        }))?;
         Ok(())
     }
 }
@@ -148,10 +120,27 @@ pub fn request_accessibility_prompt_sync<R: Runtime>(_handle: &AppHandle<R>) -> 
     Ok(())
 }
 
+/// `kIOHIDRequestTypeListenEvent`
+const IOHID_REQUEST_TYPE_LISTEN_EVENT: u32 = 1;
+/// `kIOHIDAccessTypeGranted`
+const IOHID_ACCESS_TYPE_GRANTED: u32 = 0;
+
 #[cfg(target_os = "macos")]
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
-    fn IOHIDRequestAccess(request: u32);
+    fn IOHIDRequestAccess(request: u32) -> u8;
+    fn IOHIDCheckAccess(request: u32) -> u32;
+}
+
+#[cfg(target_os = "macos")]
+fn input_monitoring_granted() -> bool {
+    // SAFETY: plain IOKit query without pointers.
+    unsafe { IOHIDCheckAccess(IOHID_REQUEST_TYPE_LISTEN_EVENT) == IOHID_ACCESS_TYPE_GRANTED }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn input_monitoring_granted() -> bool {
+    true
 }
 
 /// Registers this process for Input Monitoring (`kIOHIDRequestTypeListenEvent`) on the main thread.
@@ -159,7 +148,7 @@ pub fn register_input_monitoring_sync<R: Runtime>(handle: &AppHandle<R>) -> Resu
     #[cfg(target_os = "macos")]
     {
         run_on_main_thread_sync(handle, || unsafe {
-            IOHIDRequestAccess(1);
+            IOHIDRequestAccess(IOHID_REQUEST_TYPE_LISTEN_EVENT);
         })?;
     }
     Ok(())

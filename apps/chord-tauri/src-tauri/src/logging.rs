@@ -268,6 +268,38 @@ fn persist_level(handle: &AppHandle, level: LevelFilter) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Regression: closing the terminal that launched Chord leaves stdout and
+    /// stderr as broken file descriptors. Writing a log line then had to stay
+    /// non-fatal, because a panic here reached the panic hook, which logs again
+    /// and aborted the process (SIGABRT) on the resulting double panic.
+    #[test]
+    fn stdout_target_survives_a_closed_stdout() {
+        // Replace fd 1 with a closed pipe so every write fails with EPIPE.
+        let mut fds = [0_i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (read_end, write_end) = (fds[0], fds[1]);
+        let saved_stdout = unsafe { libc::dup(libc::STDOUT_FILENO) };
+        assert!(saved_stdout >= 0);
+        unsafe {
+            libc::dup2(write_end, libc::STDOUT_FILENO);
+            libc::close(write_end);
+            libc::close(read_end); // reader gone => writes now fail
+        }
+
+        let wrote = std::panic::catch_unwind(|| {
+            use std::io::Write;
+            let mut stdout = std::io::stdout();
+            let _ = writeln!(stdout, "log line into a broken pipe");
+        });
+
+        unsafe {
+            libc::dup2(saved_stdout, libc::STDOUT_FILENO);
+            libc::close(saved_stdout);
+        }
+
+        assert!(wrote.is_ok(), "writing to a broken stdout must not panic");
+    }
+
     #[test]
     fn bounds_a_single_formatted_message_on_a_utf8_boundary() {
         let oversized = "🧠".repeat(MAX_LOG_MESSAGE_BYTES);
@@ -463,4 +495,23 @@ mod terminal {
             assert!(matches!(parse_command("log debug now"), Some(Err(_))));
         }
     }
+}
+
+/// Stdout target that can never abort the process.
+///
+/// `TargetKind::Stdout` routes through fern's writer output, whose fallback on a
+/// failed write (`backup_logging`) writes to stderr and **panics** if that write
+/// also fails. When Chord is launched from a terminal that is later closed, both
+/// stdout and stderr are broken pipes (EPIPE/EBADF), so any log call panics. If
+/// that happens inside the panic hook — which also logs — the second panic aborts
+/// the process (SIGABRT). Swallowing the write error here keeps logging lossy
+/// rather than fatal.
+pub fn stdout_target() -> Target {
+    let dispatch = fern::Dispatch::new().chain(fern::Output::call(|record| {
+        use std::io::Write;
+        let mut stdout = std::io::stdout();
+        let _ = writeln!(stdout, "{}", record.args());
+    }));
+
+    Target::new(TargetKind::Dispatch(dispatch))
 }

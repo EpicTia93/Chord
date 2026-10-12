@@ -378,31 +378,14 @@ fn encode_elevated_argument(argument: &str) -> String {
     encoded
 }
 
-/// `(package root, module path relative to it)` for the module whose `import.meta` is `meta`.
+/// `(package root, module path relative to it)` for the module at `module_path`.
 ///
 /// Inside the app the package is found through the package manager (the module was imported
-/// from the package directory, so `import.meta.path` is under a known root). Standalone
+/// from the package directory, so its path is under a known root). Standalone
 /// (`chord bun file.ts`) the nearest ancestor with a `package.json` is taken as the root, so
 /// packages can be exercised from a checkout.
-fn locate_module<'js>(ctx: &Ctx<'js>, meta: &Object<'js>) -> rbun::Result<(PathBuf, PathBuf)> {
-    let module_path = meta
-        .get::<_, Option<String>>("path")
-        .ok()
-        .flatten()
-        .filter(|path| !path.is_empty())
-        .or_else(|| {
-            meta.get::<_, Option<String>>("url")
-                .ok()
-                .flatten()
-                .and_then(|url| url.strip_prefix("file://").map(str::to_string))
-        });
-    let Some(module_path) = module_path else {
-        return Err(Exception::throw_message(
-            ctx,
-            "expected `import.meta` of a module loaded from disk (it has no path)",
-        ));
-    };
-    let module_path = PathBuf::from(module_path);
+fn locate_module_path<'js>(ctx: &Ctx<'js>, module_path: &Path) -> rbun::Result<(PathBuf, PathBuf)> {
+    let module_path = module_path.to_path_buf();
 
     if let Ok(handle) = app_handle(ctx) {
         let package_manager = handle.app_state().chord_package_manager();
@@ -431,30 +414,76 @@ fn locate_module<'js>(ctx: &Ctx<'js>, meta: &Object<'js>) -> rbun::Result<(PathB
     ))
 }
 
-/// `resolvePackageFile(import.meta, "target/x/y")`: the absolute path of a file of the calling
-/// module's package, given relative to the package root as authored (vendored packages are
-/// remapped to where their folders were copied). The file need not exist.
-fn resolve_package_file<'js>(
-    ctx: Ctx<'js>,
-    meta: Object<'js>,
-    relative: String,
+/// The absolute path of a file of `module_path`'s package, given relative to the package root
+/// as authored (vendored packages are remapped to where their folders were copied). The file
+/// need not exist.
+fn package_file_for<'js>(
+    ctx: &Ctx<'js>,
+    module_path: &Path,
+    relative: &str,
 ) -> rbun::Result<String> {
-    let (root, module_relpath) = locate_module(&ctx, &meta)?;
-    let resolved = resolve_logical_package_path(&module_relpath, Path::new(&relative))
-        .or_throw_msg(&ctx, "invalid package-relative path")?;
+    let (root, module_relpath) = locate_module_path(ctx, module_path)?;
+    let resolved = resolve_logical_package_path(&module_relpath, Path::new(relative))
+        .or_throw_msg(ctx, "invalid package-relative path")?;
     Ok(root.join(resolved).to_string_lossy().into_owned())
 }
 
-/// `resolveNativeModulePath(import.meta, "menu")`: the absolute path of the package's prebuilt
-/// Node-API add-on `target/<this triple>/menu/menu.node`, ready for `process.dlopen`.
-fn resolve_native_module_path<'js>(
-    ctx: Ctx<'js>,
-    meta: Object<'js>,
-    relpath: String,
-) -> rbun::Result<String> {
-    let module_relpath = native_module_relpath(&relpath)
-        .or_throw_msg(&ctx, "invalid native module relative path")?;
-    resolve_package_file(ctx, meta, module_relpath.to_string_lossy().into_owned())
+/// Build the `import.meta.chord` namespace for the module at `module_path`.
+///
+/// Every function closes over that path, which comes from Bun's own per-module
+/// `import.meta` hook rather than from an argument. A module therefore cannot resolve as if it
+/// were a different one, which the previous `chord` module exports (taking `import.meta` as a
+/// plain value) could not prevent.
+fn build_import_meta_namespace<'js>(
+    ctx: &Ctx<'js>,
+    module_path: PathBuf,
+) -> rbun::Result<Object<'js>> {
+    let namespace = Object::new(ctx.clone())?;
+
+    // `import.meta.chord.resolvePackageFile("target/x/y")`
+    let path = module_path.clone();
+    namespace.set(
+        "resolvePackageFile",
+        Func::from(move |ctx: Ctx<'js>, relative: String| {
+            package_file_for(&ctx, &path, &relative)
+        }),
+    )?;
+
+    // `import.meta.chord.resolveNative("menu")`: the package's prebuilt Node-API add-on
+    // `target/<this triple>/menu/menu.node`, ready for `process.dlopen`.
+    let path = module_path;
+    namespace.set(
+        "resolveNative",
+        Func::from(move |ctx: Ctx<'js>, relpath: String| {
+            let module_relpath = native_module_relpath(&relpath)
+                .or_throw_msg(&ctx, "invalid native module relative path")?;
+            package_file_for(&ctx, &path, &module_relpath.to_string_lossy())
+        }),
+    )?;
+
+    Ok(namespace)
+}
+
+/// Attach `import.meta.chord` to every module Bun loads from disk.
+///
+/// Install once per runtime, before any handler is imported. JavaScriptCore caches the
+/// `import.meta` object this decorates, so the namespace persists for the module's lifetime.
+pub(crate) async fn install_import_meta_hook(rt: &rbun::AsyncRuntime) {
+    rt.set_import_meta_hook(Some(Box::new(|ctx, specifier, meta| {
+        // The specifier is a filesystem path for modules loaded from disk, and a bare name
+        // (`chord`) or synthetic id for the rest, which own no package and get no namespace.
+        let Some(specifier) = specifier.as_string().and_then(|s| s.to_string().ok()) else {
+            return;
+        };
+        let module_path = Path::new(specifier.strip_prefix("file://").unwrap_or(&specifier));
+        if !module_path.is_absolute() {
+            return;
+        }
+        if let Ok(namespace) = build_import_meta_namespace(&ctx, module_path.to_path_buf()) {
+            let _ = meta.set("chord", namespace);
+        }
+    })))
+    .await;
 }
 
 impl ModuleDef for ChordModule {
@@ -469,8 +498,6 @@ impl ModuleDef for ChordModule {
         declare.declare("onAppLaunch")?;
         declare.declare("onAppTerminate")?;
         declare.declare("runSudoCommand")?;
-        declare.declare("resolvePackageFile")?;
-        declare.declare("resolveNativeModulePath")?;
         Ok(())
     }
 
@@ -492,11 +519,6 @@ impl ModuleDef for ChordModule {
         exports.export("onAppLaunch", Func::from(on_app_launch))?;
         exports.export("onAppTerminate", Func::from(on_app_terminate))?;
         exports.export("runSudoCommand", Func::from(Async(run_sudo_command)))?;
-        exports.export("resolvePackageFile", Func::from(resolve_package_file))?;
-        exports.export(
-            "resolveNativeModulePath",
-            Func::from(resolve_native_module_path),
-        )?;
 
         Ok(())
     }

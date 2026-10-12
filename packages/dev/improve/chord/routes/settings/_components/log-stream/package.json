@@ -10,11 +10,11 @@
   },
   "dependencies": {
     "@chord/dev.improve.chord.api.taurpc": "workspace:*",
-    "@tauri-apps/plugin-log": "^2.9.0",
-    "react": "^19.2.8"
+    "@tauri-apps/plugin-log": "^2.10.1",
+    "react": "^19.3.0"
   },
   "devDependencies": {
-    "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.5"
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0"
   }
 }

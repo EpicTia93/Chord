@@ -1,12 +1,9 @@
 use crate::app::AppSingleton;
-use crate::app::permissions::{
-    AppPermissions, AppPermissionsAccessibility, AppPermissionsInputMonitoring,
-};
-use crate::state::{AppPermissionsObservable, AppPermissionsState, Observable};
+use crate::app::permissions::AppPermissions;
+use crate::state::AppPermissionsObservable;
 use anyhow::Result;
 use nject::provider;
 use tauri::AppHandle;
-use tauri_plugin_autostart::ManagerExt;
 
 #[provider]
 pub struct AppPermissionsProvider {

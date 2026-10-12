@@ -34,7 +34,7 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-cc = "1.4"
+cc = "1.8"
 
 [dependencies]
 tauri = { version = "2", features = [
@@ -44,8 +44,8 @@ tauri = { version = "2", features = [
 ] }
 taurpc-macros = { path = "./crates/taurpc_macros" }
 tauri-plugin-opener = "2"
-tauri-plugin-dialog = "2.7"
-tauri-plugin-fs = "2.5.1"
+tauri-plugin-dialog = "2.8"
+tauri-plugin-fs = "2.7.0"
 serde = { version = "1", features = [ "derive" ] }
 serde_json = "1"
 shlex = "2"
@@ -53,15 +53,15 @@ base64 = "0.23"
 tokio = { version = "1", features = [ "full" ] }
 tauri-plugin-user-input = "0.1.1"
 tauri-plugin-macos-permissions = "2.3.0"
-tauri-plugin-single-instance = "2.4.3"
+tauri-plugin-single-instance = "2.5.3"
 tauri-plugin-log = "2"
 log = "*"
 rdev = { git = "https://github.com/KeyChord/rdev", features = [
 	"unstable_grab",
 	"x11"
 ] }
-observable-property = "0.4.3"
-toml = "1.1.4"
+observable-property = "0.4.4"
+toml = "1.1.8"
 anyhow = "1.0"
 regex = "1.13.1"
 libc = "0.2"
@@ -71,16 +71,16 @@ clap = { version = "4.6", features = [ "derive" ] }
 keycode = "1"
 device_query = "4"
 walkdir = "2.5.0"
-gix = { version = "0.87.1", features = [ "blocking-http-transport-reqwest-rust-tls" ] }
+gix = { version = "0.89.0", features = [ "blocking-http-transport-reqwest-rust-tls" ] }
 fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
 mac-keycode = "0.0.2"
 rbun = { path = "../../../../rbun/crates/rbun" }
 tauri-plugin-store = "2"
-jsonc-parser = "0.33.1"
+jsonc-parser = "0.34.0"
 typeshare = "1"
 specta = { version = "=2.0.0-rc.25", features = [ "derive" ] }
 taurpc = "0.8.2"
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 arc-swap = "1.9"
 ordermap = "1.2"
 frontmost = { git = "https://github.com/KeyChord/frontmost" }
@@ -95,9 +95,11 @@ nject = "0.5.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
-objc2 = "0.6.4"
+objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", features = [ "block2" ] }
 objc2-foundation = { version = "0.3.2", features = [ "block2" ] }
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
 macos-accessibility-client = "0.0.2"
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1", version = "2.1.0" }
 raw-window-handle = "0.6"
@@ -105,4 +107,4 @@ window-vibrancy = "0.8"
 osakit = "0.3.1"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
-tauri-plugin-autostart = "2.5.1"
+tauri-plugin-autostart = "2.7.0"
