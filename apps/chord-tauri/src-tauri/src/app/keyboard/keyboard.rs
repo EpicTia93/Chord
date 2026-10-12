@@ -2,7 +2,7 @@ use super::caps_listener::CapsHandle;
 use super::caps_lock_restore::CapsLockRestore;
 use super::health::{Backoff, InputHealth};
 use super::secure_input::SecureInputState;
-use super::tap::TapHandle;
+use super::tap::{TapEvent, TapHandle};
 use crate::app::AppHandleExt;
 use crate::models::{AppKeyboardState, Key, KeyEvent, KeyEventAction};
 use anyhow::Result;
@@ -309,12 +309,19 @@ impl AppKeyboard {
         let handle = self.handle.clone();
         let mut queue_full_reported = false;
         let mut disconnected_reported = false;
-        let sink = move |event: KeyEvent| -> KeyEventAction {
+        let sink = move |event: TapEvent| -> KeyEventAction {
             let keyboard = handle.app_state().keyboard();
             handle
                 .app_state()
                 .dev_lockfile_detector()
                 .with_input_owner(|generation| {
+                    let event = match event {
+                        TapEvent::Key(event) => event,
+                        TapEvent::NonModifierFlagsChanged(key) => {
+                            log::debug!("Suppressing non-modifier flagsChanged for {key:?}");
+                            return KeyEventAction::Consume;
+                        }
+                    };
                     let action = keyboard.handle_key_event(&event);
                     match tx.try_send((generation, event)) {
                         Ok(()) => {}

@@ -9,6 +9,7 @@
 use super::health::InputHealth;
 use crate::models::{Key, KeyEvent, KeyEventAction};
 use anyhow::{Context, Result, anyhow};
+use keycode::KeyMappingCode;
 use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CFRunLoopRunResult, kCFRunLoopCommonModes,
     kCFRunLoopDefaultMode,
@@ -49,7 +50,16 @@ const NX_ALTERNATEMASK: u64 = 0x0008_0000;
 const NX_COMMANDMASK: u64 = 0x0010_0000;
 const NX_SECONDARYFNMASK: u64 = 0x0080_0000;
 
-pub type TapSink = Box<dyn FnMut(KeyEvent) -> KeyEventAction + Send>;
+#[derive(Debug, PartialEq)]
+pub enum TapEvent {
+    Key(KeyEvent),
+    /// Restoring Caps Lock can emit flagsChanged with the last ordinary
+    /// key's code. Chromium interprets it as a keydown with an Unidentified
+    /// key, even when Chord swallowed that key's actual press and release.
+    NonModifierFlagsChanged(Key),
+}
+
+pub type TapSink = Box<dyn FnMut(TapEvent) -> KeyEventAction + Send>;
 
 /// State handed to the C callback. Lives on the tap thread for as long as the
 /// tap exists; the callback only runs on that thread.
@@ -89,16 +99,8 @@ impl TapContext {
         }
 
         let keycode = CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
-        let key_event = match kind {
-            CGEventType::KeyDown => key_from_keycode(keycode).map(KeyEvent::Press),
-            CGEventType::KeyUp => key_from_keycode(keycode).map(KeyEvent::Release),
-            CGEventType::FlagsChanged => {
-                decode_flags_changed(keycode, CGEvent::flags(Some(event)).bits())
-            }
-            _ => None,
-        };
-        match key_event {
-            Some(key_event) => (self.sink)(key_event),
+        match decode_tap_event(kind, keycode, CGEvent::flags(Some(event)).bits()) {
+            Some(event) => (self.sink)(event),
             None => KeyEventAction::Forward,
         }
     }
@@ -129,6 +131,26 @@ unsafe extern "C-unwind" fn tap_callback(
 fn key_from_keycode(keycode: i64) -> Option<Key> {
     let keycode = u16::try_from(keycode).ok()?;
     Key::try_from(mac_keycode::Key::from_keycode(keycode)?).ok()
+}
+
+fn decode_tap_event(kind: CGEventType, keycode: i64, flags: u64) -> Option<TapEvent> {
+    match kind {
+        CGEventType::KeyDown => key_from_keycode(keycode)
+            .map(KeyEvent::Press)
+            .map(TapEvent::Key),
+        CGEventType::KeyUp => key_from_keycode(keycode)
+            .map(KeyEvent::Release)
+            .map(TapEvent::Key),
+        CGEventType::FlagsChanged => decode_flags_changed(keycode, flags)
+            .map(TapEvent::Key)
+            .or_else(|| {
+                key_from_keycode(keycode)
+                    // Real Caps Lock toggle notifications must still reach apps.
+                    .filter(|key| key.0 != KeyMappingCode::CapsLock)
+                    .map(TapEvent::NonModifierFlagsChanged)
+            }),
+        _ => None,
+    }
 }
 
 /// Turns a modifier `flagsChanged` event into a press or release.
@@ -375,5 +397,43 @@ mod tests {
         assert_eq!(key_from_keycode(0x39), Some(key(KeyMappingCode::CapsLock)));
         assert_eq!(key_from_keycode(0x00), Some(key(KeyMappingCode::KeyA)));
         assert_eq!(key_from_keycode(0x7FFF), None);
+    }
+
+    #[test]
+    fn caps_restoration_does_not_become_another_space_press() {
+        let space = key(KeyMappingCode::Space);
+        assert_eq!(
+            decode_tap_event(CGEventType::KeyDown, 0x31, 0x100),
+            Some(TapEvent::Key(KeyEvent::Press(space)))
+        );
+        assert_eq!(
+            decode_tap_event(CGEventType::FlagsChanged, 0x31, 0x100),
+            Some(TapEvent::NonModifierFlagsChanged(space))
+        );
+        assert_eq!(
+            decode_tap_event(CGEventType::KeyUp, 0x31, 0x100),
+            Some(TapEvent::Key(KeyEvent::Release(space)))
+        );
+        // Restoration can carry other ordinary keycodes too.
+        assert_eq!(
+            decode_tap_event(CGEventType::FlagsChanged, 0, 0),
+            Some(TapEvent::NonModifierFlagsChanged(key(KeyMappingCode::KeyA)))
+        );
+    }
+
+    #[test]
+    fn real_modifier_changes_keep_their_existing_behavior() {
+        assert_eq!(
+            decode_tap_event(CGEventType::FlagsChanged, CAPS_LOCK, 0x10100),
+            None
+        );
+        assert_eq!(
+            decode_tap_event(CGEventType::FlagsChanged, 0xFF, 0x100),
+            None
+        );
+        assert_eq!(
+            decode_tap_event(CGEventType::FlagsChanged, SHIFT, NX_SHIFTMASK),
+            Some(TapEvent::Key(KeyEvent::Press(key(KeyMappingCode::ShiftLeft))))
+        );
     }
 }
