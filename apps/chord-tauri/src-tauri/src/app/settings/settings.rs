@@ -16,7 +16,7 @@ pub struct AppSettings {
 
 impl AppSettings {
     pub fn refresh_cli_installation(&self) -> anyhow::Result<()> {
-        let executable = std::env::current_exe()?;
+        let executable = cli_executable()?;
         self.observable.try_set_state(|mut state| {
             state.is_cli_installed = super::cli::is_installed(
                 &std::path::Path::new("/usr/local/bin").join(&state.cli_command),
@@ -29,7 +29,7 @@ impl AppSettings {
     pub fn install_cli(&self) -> anyhow::Result<()> {
         let state = self.observable.get_state()?;
         let destination = std::path::Path::new("/usr/local/bin").join(&state.cli_command);
-        super::cli::install(&std::env::current_exe()?, &destination)?;
+        super::cli::install(&cli_executable()?, &destination)?;
         self.refresh_cli_installation()
     }
 
@@ -146,6 +146,17 @@ impl AppSettings {
         store.save().context("failed to save app state store")?;
 
         Ok(())
+    }
+}
+
+fn cli_executable() -> anyhow::Result<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::dev_runtime::cli_executable()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(std::env::current_exe()?)
     }
 }
 

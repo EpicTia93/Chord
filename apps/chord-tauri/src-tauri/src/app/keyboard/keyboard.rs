@@ -4,6 +4,7 @@ use super::health::{Backoff, InputHealth};
 use super::secure_input::SecureInputState;
 use super::tap::{TapEvent, TapHandle};
 use crate::app::AppHandleExt;
+use crate::app::permissions::{InputMonitoringAccess, InputPermissions};
 use crate::models::{AppKeyboardState, Key, KeyEvent, KeyEventAction};
 use anyhow::Result;
 use bitflags::bitflags;
@@ -149,10 +150,12 @@ impl AppKeyboard {
                                 permissions_error_reported = true;
                                 log::error!("Failed to refresh input permissions: {error:#}");
                             }
-                            (false, false)
+                            InputPermissions::UNAVAILABLE
                         }
                     };
-                    state.keyboard().reconcile_listeners(permissions, Instant::now());
+                    state
+                        .keyboard()
+                        .reconcile_listeners(permissions, Instant::now());
                     state.keyboard().check_secure_input();
                     std::thread::sleep(SUPERVISOR_INTERVAL);
                 }
@@ -167,11 +170,11 @@ impl AppKeyboard {
     }
 
     /// Brings the listeners in line with the granted permissions, restarting
-    /// anything that died. `(accessibility, input_monitoring)`.
-    pub(super) fn reconcile_listeners(&self, (accessibility, input_monitoring): (bool, bool), now: Instant) {
+    /// anything that died. All non-granted results fail closed.
+    pub(super) fn reconcile_listeners(&self, permissions: InputPermissions, now: Instant) {
         let mut listeners = self.listeners();
-        self.reconcile_tap(&mut listeners, accessibility, now);
-        self.reconcile_caps(&mut listeners, input_monitoring, now);
+        self.reconcile_tap(&mut listeners, permissions.accessibility, now);
+        self.reconcile_caps(&mut listeners, permissions.input_monitoring, now);
     }
 
     fn reconcile_tap(&self, listeners: &mut Listeners, accessibility: bool, now: Instant) {
@@ -184,7 +187,9 @@ impl AppKeyboard {
         }
         if !accessibility {
             if let Some(tap) = listeners.tap.take() {
-                log::warn!("Accessibility permission was revoked; stopping the keyboard event tap");
+                log::warn!(
+                    "Accessibility check no longer reports granted; stopping the keyboard event tap"
+                );
                 tap.stop();
             }
             return;
@@ -212,7 +217,12 @@ impl AppKeyboard {
         }
     }
 
-    fn reconcile_caps(&self, listeners: &mut Listeners, input_monitoring: bool, now: Instant) {
+    fn reconcile_caps(
+        &self,
+        listeners: &mut Listeners,
+        input_monitoring: InputMonitoringAccess,
+        now: Instant,
+    ) {
         if listeners.caps.as_ref().is_some_and(CapsHandle::is_finished) {
             log::error!("Caps Lock listener thread exited unexpectedly; scheduling a restart");
             if let Some(caps) = listeners.caps.take() {
@@ -220,9 +230,11 @@ impl AppKeyboard {
             }
             listeners.caps_backoff.failed(now);
         }
-        if !input_monitoring {
+        if !input_monitoring.is_granted() {
             if let Some(caps) = listeners.caps.take() {
-                log::warn!("Input Monitoring permission was revoked; stopping the Caps Lock listener");
+                log::warn!(
+                    "Input Monitoring check reports {input_monitoring:?}; stopping the Caps Lock listener"
+                );
                 caps.stop();
             }
             return;
@@ -382,7 +394,11 @@ impl AppKeyboard {
         let sink = move |pressed: bool| {
             // Mirror the physical key immediately so a Space arriving on the
             // event tap moments later sees the right state.
-            handle.app_state().keyboard().state().set_caps_pressed(pressed);
+            handle
+                .app_state()
+                .keyboard()
+                .state()
+                .set_caps_pressed(pressed);
             match tx.try_send(pressed) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {

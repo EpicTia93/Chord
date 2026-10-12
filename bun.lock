@@ -187,6 +187,7 @@
       },
       "devDependencies": {
         "@chord/com.npmjs.tanstack__router-plugin": "workspace:*",
+        "@chord/dev.improve.chord.configs.dev.tauri": "workspace:*",
         "@chord/dev.improve.chord.configs.release.macos": "workspace:*",
         "@rolldown/plugin-babel": "^0.2.4",
         "@tailwindcss/vite": "^4.3.3",

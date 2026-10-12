@@ -86,6 +86,38 @@ Start the desktop app with:
 bun run dev
 ```
 
+On macOS, the development runner builds with Tauri and uses Cargo's runner hook
+to launch a signed, immutable `.app` snapshot through Launch Services. The executable
+and embedded Bun dylib are copied out of the build directories; the copy's Bun
+load command points directly to its bundled dylib. Rebuilding Chord or rbun while
+the app is running cannot replace these files. Vite hot reload still works.
+Running `bun run dev` inside `apps/chord-tauri` uses the same launcher and starts Vite.
+Raw `cargo run` or `tauri dev` bypasses this launcher and runs the build output directly.
+
+Snapshots live in `~/Library/Application Support/<development identifier>/runtime-snapshots/`,
+outside Cargo's target directory. `current` is updated atomically after signing and
+verification; CLI installation points through it so CLI links survive rebuilds.
+Every app and CLI worker holds a shared runtime lease. Collection removes only
+non-current snapshots whose lease can be acquired exclusively. Do not manually
+remove a snapshot while it is in use. The runner forwards stop signals to the
+specific launched app after verifying its PID's executable path.
+
+The default signing identity comes from `bundle.macOS.signingIdentity`; override it
+with `CHORD_DEV_SIGNING_IDENTITY` or `APPLE_SIGNING_IDENTITY`. A certificate-backed
+identity is required; the launcher does not fall back to ad-hoc signing. Grant
+Accessibility and Input Monitoring to **Chord (Development)** once after switching
+to this launcher. Warp's grants no longer authorize the app. Chord continues to
+stop interception whenever access is unavailable and resumes after a grant.
+Permission logs retain denied/unknown/unexpected states and report executable
+replacement separately, rather than claiming every failed check was a revocation.
+
+Verify the snapshot launcher on a Mac with the configured signing certificate and
+an active desktop session using
+`bun test ./packages/dev/improve/chord/configs/dev/tauri/runtime.test.ts`.
+The tests exercise signed executable/library isolation, generation leases,
+PID-safe signaling, and Launch Services output/shutdown. Rust's runtime-worker
+lease and permission-state tests are included in `cargo test --lib`.
+
 On macOS, a new development app launch replaces the running instance with the
 same development bundle identifier. Startup logs the previous PID, sends SIGTERM,
 and waits for it to exit before starting the new instance. If it ignores SIGTERM

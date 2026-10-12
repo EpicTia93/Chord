@@ -4,7 +4,7 @@
 	"version": "0.1.0-alpha.3",
 	"private": true,
 	"scripts": {
-		"dev": "RUST_BACKTRACE=full tauri dev --no-watch --config src-tauri/tauri.dev.conf.json",
+		"dev": "tauri-dev",
 		"release-macos": "release-macos",
 		"vite-dev": "vite",
 		"build": "tsc && vite build",
@@ -70,6 +70,7 @@
 		"vaul": "^1.1.2"
 	},
 	"devDependencies": {
+		"@chord/dev.improve.chord.configs.dev.tauri": "workspace:*",
 		"@chord/dev.improve.chord.configs.release.macos": "workspace:*",
 		"@chord/com.npmjs.tanstack__router-plugin": "workspace:*",
 		"@rolldown/plugin-babel": "^0.2.4",

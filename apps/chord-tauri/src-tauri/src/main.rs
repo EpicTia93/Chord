@@ -69,7 +69,24 @@ enum Commands {
 }
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    if let Err(error) = chords_lib::dev_runtime::initialize_stdio() {
+        eprintln!("Failed to connect development log streams: {error:#}");
+        std::process::exit(1);
+    }
     let cli = Cli::parse();
+
+    #[cfg(target_os = "macos")]
+    let _runtime_lease = match chords_lib::dev_runtime::acquire(matches!(
+        &cli.command,
+        None | Some(Commands::AppChord { .. })
+    )) {
+        Ok(lease) => lease,
+        Err(error) => {
+            eprintln!("Failed to acquire development runtime lease: {error:#}");
+            std::process::exit(1);
+        }
+    };
 
     // Recover the PATH a GUI launch does not inherit (Finder/Dock give an app a minimal
     // `/usr/bin:/bin:/usr/sbin:/sbin`). `fix_path_env` does that by running `$SHELL -ilc env`,

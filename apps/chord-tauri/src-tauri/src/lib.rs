@@ -10,16 +10,19 @@ use tauri_nspanel::tauri_panel;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_log::{Target, TargetKind};
 
+#[cfg(target_os = "macos")]
+pub mod dev_runtime;
+
 mod api;
 mod app;
+mod bun_js;
 mod chordpack;
 mod constants;
 pub mod git;
+mod logging;
 mod mode;
 mod models;
 pub mod native_input;
-mod bun_js;
-mod logging;
 mod process;
 mod setup;
 mod state;
@@ -152,8 +155,10 @@ fn run_app_with_cli_command(startup_command: Option<tauri_app::scripting::CliApp
         &context.config().identifier,
         startup_command.is_some(),
     ) {
-        Some(tauri_app::dev_instance::LaunchGuard::acquire(&context.config().identifier)
-            .expect("failed to replace previous development instance"))
+        Some(
+            tauri_app::dev_instance::LaunchGuard::acquire(&context.config().identifier)
+                .expect("failed to replace previous development instance"),
+        )
     } else {
         None
     };
@@ -213,6 +218,8 @@ fn run_app_with_cli_command(startup_command: Option<tauri_app::scripting::CliApp
                     .title("Startup Error")
                     .blocking_show();
 
+                #[cfg(target_os = "macos")]
+                let _ = dev_runtime::publish_exit(1);
                 std::process::exit(1);
             }
 
@@ -232,12 +239,26 @@ fn run_app_with_cli_command(startup_command: Option<tauri_app::scripting::CliApp
 
     #[cfg(target_os = "macos")]
     if let Some(guard) = dev_launch {
-        guard.wait_until_listening()
+        guard
+            .wait_until_listening()
             .expect("failed to initialize development instance");
     }
 
-    app.run(|handle, event| {
+    #[cfg(target_os = "macos")]
+    let mut exit_code = 0;
+    app.run(move |handle, event| {
+        #[cfg(target_os = "macos")]
+        if let RunEvent::ExitRequested {
+            code: Some(code), ..
+        } = &event
+        {
+            exit_code = *code;
+        }
         if let RunEvent::Exit = event {
+            #[cfg(target_os = "macos")]
+            if let Err(error) = dev_runtime::publish_exit(exit_code) {
+                log::error!("Failed to publish development app exit status: {error:#}");
+            }
             if let Err(error) = handle.state::<AppLockFile>().cleanup() {
                 log::error!("Failed to remove app lock file on exit: {error}");
             }

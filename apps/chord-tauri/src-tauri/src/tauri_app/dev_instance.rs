@@ -39,6 +39,7 @@ impl LaunchGuard {
         };
         if let Some(pid) = guard.peer_pid()? {
             eprintln!("Replacing previous Chord development instance (PID {pid})");
+            crate::dev_runtime::mark_replaced(pid)?;
             // Obtain the PID from the live socket, never from a stale PID file or
             // a process-name match that could target another app/channel.
             if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
