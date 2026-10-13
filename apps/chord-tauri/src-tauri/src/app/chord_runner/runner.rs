@@ -64,7 +64,7 @@ impl ChordActionTaskRunner {
     }
 
     /// Called when the chord keys are lifted. Async is needed for buffering chords.
-    pub async fn end_task(&self, task_run: ChordActionTaskRun) -> anyhow::Result<()> {
+    pub async fn end_task(&self, task_run: &mut ChordActionTaskRun) -> anyhow::Result<()> {
         let result = match task_run {
             ChordActionTaskRun::Handler(task_run) => self.handler.end(task_run).await,
             ChordActionTaskRun::Shell(task_run) => self.shell.end(task_run).await,
@@ -76,8 +76,7 @@ impl ChordActionTaskRunner {
         result
     }
 
-    /// Called if the user explicitly presses `Esc` or reloads the config
-    #[allow(dead_code)]
+    /// Cancel an in-flight action, including releasing held simulated keys.
     pub fn abort_task(&self, task_run: ChordActionTaskRun) -> anyhow::Result<()> {
         match task_run {
             ChordActionTaskRun::Handler(task_run) => self.handler.abort(task_run)?,

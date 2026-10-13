@@ -3,8 +3,10 @@ use crate::models::{ShortcutChordAction, SimulatedShortcutAction};
 use anyhow::{Context, Result, anyhow};
 use nject::injectable;
 use tauri::AppHandle;
+use tauri::async_runtime::JoinHandle;
 
 #[injectable]
+#[derive(Clone)]
 pub struct ShortcutChordActionTaskRunner {
     handle: AppHandle,
 }
@@ -99,7 +101,24 @@ impl ShortcutChordActionTaskRunner {
 
 #[derive(Debug)]
 pub struct ShortcutChordActionTaskRun {
+    join_handle: Option<JoinHandle<Result<()>>>,
     end_simulated_shortcut_actions: Vec<SimulatedShortcutAction>,
+}
+
+async fn repeat_shortcut_actions(
+    count: u32,
+    start: Vec<SimulatedShortcutAction>,
+    end: Vec<SimulatedShortcutAction>,
+    mut simulate: impl FnMut(Vec<SimulatedShortcutAction>) -> Result<()>,
+) -> Result<()> {
+    for index in 0..count {
+        simulate(start.clone())?;
+        if index + 1 < count {
+            simulate(end.clone())?;
+        }
+        tokio::task::yield_now().await;
+    }
+    Ok(())
 }
 
 impl ShortcutChordActionTaskRunner {
@@ -108,23 +127,89 @@ impl ShortcutChordActionTaskRunner {
         task: &ChordActionTask,
         action: &ShortcutChordAction,
     ) -> Result<ShortcutChordActionTaskRun> {
-        self.simulate_shortcut_actions(
-            self.get_start_simulated_shortcut_actions(action, task.num_times),
-        )?;
+        let start_actions = self.get_start_simulated_shortcut_actions(action, 1);
+        let end_actions = self.get_end_simulated_shortcut_actions(action);
+        let join_handle = if task.num_times > 1 {
+            let runner = self.clone();
+            let end_actions = end_actions.clone();
+            let num_times = task.num_times;
+            Some(tauri::async_runtime::spawn(repeat_shortcut_actions(
+                num_times,
+                start_actions,
+                end_actions,
+                move |actions| runner.simulate_shortcut_actions(actions),
+            )))
+        } else {
+            self.simulate_shortcut_actions(start_actions)?;
+            None
+        };
 
         Ok(ShortcutChordActionTaskRun {
-            end_simulated_shortcut_actions: self.get_end_simulated_shortcut_actions(action),
+            join_handle,
+            end_simulated_shortcut_actions: end_actions,
         })
     }
 
-    pub async fn end(&self, task_run: ShortcutChordActionTaskRun) -> Result<()> {
-        self.simulate_shortcut_actions(task_run.end_simulated_shortcut_actions)?;
-        Ok(())
+    pub async fn end(&self, task_run: &mut ShortcutChordActionTaskRun) -> Result<()> {
+        let result = if let Some(join_handle) = task_run.join_handle.as_mut() {
+            match join_handle.await {
+                Ok(result) => result,
+                Err(error) => Err(error.into()),
+            }
+        } else {
+            Ok(())
+        };
+        self.simulate_shortcut_actions(std::mem::take(
+            &mut task_run.end_simulated_shortcut_actions,
+        ))?;
+        result
     }
 
-    // TODO
-    #[allow(dead_code)]
-    pub fn abort(&self, _task_run: ShortcutChordActionTaskRun) -> Result<()> {
-        Ok(())
+    pub fn abort(&self, task_run: ShortcutChordActionTaskRun) -> Result<()> {
+        if let Some(join_handle) = task_run.join_handle {
+            join_handle.abort();
+        }
+        self.simulate_shortcut_actions(task_run.end_simulated_shortcut_actions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Key;
+    use keycode::KeyMappingCode;
+
+    #[tokio::test]
+    async fn finite_shortcut_repetition_releases_between_runs_and_holds_only_the_last() {
+        let key = Key(KeyMappingCode::KeyA);
+        let mut events = Vec::new();
+        repeat_shortcut_actions(
+            3,
+            vec![SimulatedShortcutAction::Press(key, false)],
+            vec![SimulatedShortcutAction::Release(key, false)],
+            |actions| {
+                events.extend(actions.into_iter().map(|action| match action {
+                    SimulatedShortcutAction::Press(_, _) => "press",
+                    SimulatedShortcutAction::Release(_, _) => "release",
+                }));
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(events, ["press", "release", "press", "release", "press"]);
+    }
+
+    #[tokio::test]
+    async fn failed_shortcuts_do_not_continue_the_remaining_repetitions() {
+        let mut calls = 0;
+        let error = repeat_shortcut_actions(u32::MAX, vec![], vec![], |_| {
+            calls += 1;
+            anyhow::bail!("simulation failed")
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert_eq!(error.to_string(), "simulation failed");
     }
 }

@@ -15,7 +15,7 @@ use crate::app::{AppHandleExt, AppSingleton};
 use crate::chordpack::load_default_chordpack;
 use crate::lock_file::AppLockFile;
 use crate::state::{
-    AppModeObservable, AppPermissionsObservable, AppSettingsObservable, ChordInputObservable,
+    AppModeObservable, AppPermissionsObservable, AppSettingsObservable, ChordInputObservable, ChordExecutionObservable,
     ChordPackageManagerObservable, ChordPackageStoreObservable, ChordPanelObservable,
     DesktopAppManagerObservable, FrontmostObservable, GitRepo, GitReposObservable,
     KeyboardObservable, Observable,
@@ -36,6 +36,7 @@ pub fn setup(app: &mut tauri::App) -> Result<()> {
     let app_permissions_observable = AppPermissionsObservable::new(app)?;
     let app_settings_observable = AppSettingsObservable::new(app)?;
     let chord_input_observable = ChordInputObservable::new(app)?;
+    let chord_execution_observable = ChordExecutionObservable::new(app)?;
     let chord_panel_observable = ChordPanelObservable::new(app)?;
     let chord_package_store_observable = ChordPackageStoreObservable::new(app)?;
     let desktop_app_manager_observable = DesktopAppManagerObservable::new(app)?;
@@ -54,6 +55,7 @@ pub fn setup(app: &mut tauri::App) -> Result<()> {
             ChordModeManagerProvider {
                 handle: handle.clone(),
                 chord_input_observable,
+                chord_execution_observable,
                 chord_panel_observable,
             }
             .provide::<ChordModeManager>(),

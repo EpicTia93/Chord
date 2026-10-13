@@ -40,8 +40,8 @@ impl ShellChordActionTaskRunner {
         Ok(ShellChordActionTaskRun { join_handle })
     }
 
-    pub async fn end(&self, task_run: ShellChordActionTaskRun) -> Result<()> {
-        task_run.join_handle.await??;
+    pub async fn end(&self, task_run: &mut ShellChordActionTaskRun) -> Result<()> {
+        (&mut task_run.join_handle).await??;
         Ok(())
     }
 

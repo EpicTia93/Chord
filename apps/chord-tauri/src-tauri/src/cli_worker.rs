@@ -45,9 +45,9 @@ where
 
     // Joining only after completion on macOS avoids starving Swift's MainActor.
     // Other platforms retain their existing blocking wait.
-    worker
-        .join()
-        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    let result = worker.join();
+    chords_lib::native_input::release_standalone_mouse();
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 #[cfg(target_os = "macos")]

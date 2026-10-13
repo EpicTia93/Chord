@@ -237,6 +237,10 @@ impl ParsedChordsFile {
     }
 
     fn parse_trigger(key: &str, _value: &Table) -> Result<ChordTrigger> {
+        anyhow::ensure!(
+            !key.starts_with('0'),
+            "the 0 prefix is reserved for built-in Chord commands"
+        );
         let raw_trigger = key;
 
         let trigger = if raw_trigger.contains('(') {
@@ -380,6 +384,10 @@ impl FromStr for ParsedChordsFile {
         if let Some(raw_chords) = root.get("chords") {
             let raw_chords = raw_chords.as_table().context("chords must be a table")?;
             for (key, value) in raw_chords {
+                anyhow::ensure!(
+                    !key.trim_start_matches('?').starts_with('0'),
+                    "the 0 prefix is reserved for built-in Chord commands: {key}"
+                );
                 let chord_value = {
                     if let Some(table) = value.as_table() {
                         table
@@ -431,6 +439,33 @@ impl FromStr for ParsedChordsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_definitions_cannot_claim_zero_commands_or_hints() {
+        for key in ["0s", "0h(\\d+)", "0custom", "?0", "?0s"] {
+            let source = format!("name = 'fixture'\n[chords]\n'{key}' = {{ shell = 'true' }}");
+            let error = source.parse::<ParsedChordsFile>().unwrap_err();
+            assert!(error.to_string().contains("0 prefix is reserved"));
+        }
+        let file: ParsedChordsFile = "name = 'fixture'\n[chords]\n'(.*)' = { shell = 'true' }"
+            .parse().unwrap();
+        assert!(!file.chords[0].trigger.matches(&Key::parse_sequence("0s").unwrap()));
+        assert!(file.chords[0].trigger.matches(&Key::parse_sequence("ab").unwrap()));
+    }
+
+    #[test]
+    fn arrow_notation_matches_physical_keys_in_literals_and_patterns() {
+        let source = r#"name = 'fixture'
+[chords]
+'a\up' = { shortcut = 'up' }
+'a\left(\d+)' = { shell = 'true' }
+"#;
+        let file: ParsedChordsFile = source.parse().unwrap();
+        for input in [r"a\up", r"a\left12"] {
+            assert!(file.chords.iter().any(|chord|
+                chord.trigger.matches(&Key::parse_sequence(input).unwrap())));
+        }
+    }
 
     #[test]
     fn regex_sections_keep_surrounding_keys_literal_and_match_the_full_sequence() {

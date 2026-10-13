@@ -67,6 +67,21 @@ export interface ChordActionTask {
 	numTimes: number;
 }
 
+export interface RunningChordLoop {
+	id: number;
+	input: string;
+}
+
+export interface MetaChordHint {
+	sequence: string;
+	name: string;
+}
+
+export interface ChordExecutionState {
+	loops: RunningChordLoop[];
+	metaCommands: MetaChordHint[];
+}
+
 export interface ChordHint {
 	pattern: { keys: string[] } | { regex: string } | { range: { prefix: string[], keys: string[] } };
 	rawPattern: string;

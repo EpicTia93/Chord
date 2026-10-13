@@ -255,6 +255,9 @@ fn run_app_with_cli_command(startup_command: Option<tauri_app::scripting::CliApp
             exit_code = *code;
         }
         if let RunEvent::Exit = event {
+            if let Err(error) = handle.app_state().chord_mode_manager().stop_loops() {
+                log::error!("Failed to stop chord loops on exit: {error:#}");
+            }
             bun_js::package_worker::shutdown_all();
             #[cfg(target_os = "macos")]
             if let Err(error) = dev_runtime::publish_exit(exit_code) {

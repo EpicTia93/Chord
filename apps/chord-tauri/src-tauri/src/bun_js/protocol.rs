@@ -54,6 +54,7 @@ pub struct Response {
 
 #[derive(Serialize, Deserialize)]
 pub enum HostRequest {
+    Mouse(crate::native_input::MouseOptions),
     Press(String),
     Release(String),
     Tap(String),

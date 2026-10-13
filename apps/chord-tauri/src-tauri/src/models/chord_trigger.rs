@@ -10,6 +10,10 @@ pub enum ChordTrigger {
 
 impl ChordTrigger {
     pub fn matches(&self, keys: &[Key]) -> bool {
+        // Even broad user regexes cannot claim the meta namespace.
+        if keys.first().is_some_and(|key| key.to_sequence_char() == Some('0')) {
+            return false;
+        }
         match self {
             ChordTrigger::Keys(trigger_keys) => trigger_keys == keys,
             ChordTrigger::Pattern(regex) => {

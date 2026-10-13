@@ -587,18 +587,64 @@ impl Key {
     }
 
     pub fn serialize_sequence(sequence: &[Key]) -> Option<String> {
-        sequence.iter().map(Key::to_sequence_char).collect()
+        let mut result = String::new();
+        for key in sequence {
+            match key.0 {
+                ArrowUp => result.push_str(r"\up"),
+                ArrowLeft => result.push_str(r"\left"),
+                ArrowDown => result.push_str(r"\down"),
+                ArrowRight => result.push_str(r"\right"),
+                _ => result.push(key.to_sequence_char()?),
+            }
+        }
+        Some(result)
     }
 
     pub fn parse_sequence(sequence: &str) -> Result<Vec<Key>> {
         let mut keys = Vec::new();
-        for key in sequence.chars().map(|c| Key::from_str(&c.to_string())) {
-            keys.push(
-                key.map_err(|_| anyhow::anyhow!("Failed to parse chord sequence: {}", sequence))?,
-            );
+        let mut remaining = sequence;
+        while !remaining.is_empty() {
+            if let Some((token, key)) = [
+                (r"\up", ArrowUp),
+                (r"\left", ArrowLeft),
+                (r"\down", ArrowDown),
+                (r"\right", ArrowRight),
+            ]
+            .into_iter()
+            .find(|(token, _)| remaining.starts_with(token))
+            {
+                keys.push(Key(key));
+                remaining = &remaining[token.len()..];
+            } else {
+                let c = remaining
+                    .chars()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("empty sequence"))?;
+                keys.push(
+                    Key::from_str(&c.to_string()).map_err(|_| {
+                        anyhow::anyhow!("Failed to parse chord sequence: {}", sequence)
+                    })?,
+                );
+                remaining = &remaining[c.len_utf8()..];
+            }
         }
 
         Ok(keys)
+    }
+}
+
+#[cfg(test)]
+mod sequence_tests {
+    use super::*;
+
+    #[test]
+    fn arrow_escapes_round_trip_and_combine_with_ordinary_keys() {
+        let sequence = r"a\up\left\down\rightb";
+        let keys = Key::parse_sequence(sequence).unwrap();
+        assert_eq!(keys, [
+            Key(KeyA), Key(ArrowUp), Key(ArrowLeft), Key(ArrowDown), Key(ArrowRight), Key(KeyB),
+        ]);
+        assert_eq!(Key::serialize_sequence(&keys).as_deref(), Some(sequence));
     }
 }
 

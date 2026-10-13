@@ -1,5 +1,7 @@
 # Project Environment
 
+- Chord reserves `0` for built-in global meta commands: `0s` Settings, `0r` reload, `0q` quit, and `0h<ID>` halt loop. Leading numeric prefixes repeat input actions; `1` starts an independent loop. Loop IDs and help live in the `chord-execution` observable owned by the chord-mode manager; normal input resets preserve loops, while reload/exit stop them. In-flight JavaScript callbacks finish on halt to preserve other handlers in their package worker. `\up`, `\left`, `\down`, and `\right` parse as physical arrow keys. The former backslash meta definitions were removed from `../chords/@keychord/chords-chord`.
+
 - Chord is a Bun workspace monorepo with a Tauri 2 desktop app in `apps/chord-tauri`.
 - The frontend is React 19, TypeScript, Vite, and Tailwind CSS 4; it is not React Native.
 - Run the app from the repository root with `bun run dev`; Vite uses port 1420.
@@ -17,3 +19,4 @@
 
 - 2026-10-12 crash investigation: reproduced NodeSwift 1.5.1's `NodeExecutor.enqueue` abort after an async `NodeActor` → `MainActor` hop with multiple addon environments. The tray and menu packages in `../chords/@keychord/` now return promises from synchronous NodeFunction entrypoints and capture an explicit NodeAsyncQueue for completion. Do not reintroduce async NodeFunction wrappers around MainActor work. Regression: `CHORD_NATIVE_TEST_HOST=<Chord executable> bun test __tests__/actor-queue.test.ts` from the tray package.
 - Caps+Space activation uses `CapturedKeyEvent`'s Caps state at capture time; queued Caps events must not overwrite the newer physical HID state. Native artifact staging uses rename so rebuilds preserve images mapped by a running process.
+- 2026-10-13: Fixed the same NodeSwift missing-queue abort in iPhone Mirroring using synchronous NodeFunction entrypoints, captured NodeAsyncQueue handles, and explicit promise completion. The Apple read-only actor-queue regression validates 500 value/void/error completions with multiple addons. Package workers now have stable supervisors that restore handler factories in registration order after crashes/timeouts, retain logical handler IDs, and never replay interrupted actions. Retry backoff is 250 ms–30 s and resets after a healthy minute; stop/unload prevents respawn. Tests: cargo test --lib (119 pass), supervisor_ --ignored (2 pass), package_faults_are_contained --ignored (1 pass).

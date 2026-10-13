@@ -1,9 +1,13 @@
+use super::chord_loops::{ChordLoops, run_loop};
 use super::chord_sequence::{ChordSequence, ChordSequenceDispatch, ChordTaskQueue};
 use crate::app::AppHandleExt;
 use crate::app::chord_runner::release_chord_sequences;
 use crate::app::state::AppSingleton;
-use crate::models::{ChordEventTrigger, ChordInputEvent, ChordKeyboardEvent, Key, KeyEvent};
-use crate::state::{ChordInputObservable, ChordInputState, Observable};
+use crate::models::{
+    ChordEventTrigger, ChordInputEvent, ChordKeyboardEvent, ChordTaskAction, Key, KeyEvent,
+    MetaChordCommand,
+};
+use crate::state::{ChordExecutionObservable, ChordInputObservable, ChordInputState, Observable};
 use anyhow::{Result, bail};
 use keycode::KeyMappingCode;
 use nject::injectable;
@@ -23,8 +27,11 @@ pub struct ChordInputManager {
     sequence: Mutex<ChordSequence>,
     #[inject(ChordTaskQueue::default())]
     task_queue: ChordTaskQueue,
+    #[inject(ChordLoops::default())]
+    loops: ChordLoops,
     handle: AppHandle,
     observable: ChordInputObservable,
+    execution_observable: ChordExecutionObservable,
 }
 
 impl ChordInputManager {
@@ -33,6 +40,10 @@ impl ChordInputManager {
         self.end_active_task();
         self.reset_matching_chords()?;
         self.observable.set_state(|_| ChordInputState::default())
+    }
+
+    pub fn stop_loops(&self) -> Result<()> {
+        self.loops.stop_all(&self.execution_observable)
     }
 
     /// Execute a complete chord sequence without synthesizing keyboard input.
@@ -178,7 +189,7 @@ impl ChordInputManager {
                 if is_shift_pressed && Self::should_clear_key_buffer_on_shifted_press(key) {
                     self.clear_key_buffer()?;
                     self.dispatch_current_buffer(&press_triggers, &event)?;
-                } else if is_shift_pressed && key.to_sequence_char().is_some() {
+                } else if is_shift_pressed && Key::serialize_sequence(&[*key]).is_some() {
                     self.handle_shifted_key_press(key, &event)?;
                 } else {
                     self.handle_unshifted_key_press(key, &event)?;
@@ -194,18 +205,18 @@ impl ChordInputManager {
         triggers: &[ChordEventTrigger],
         keyboard_event: Option<&ChordKeyboardEvent>,
     ) -> Result<ChordSequenceDispatch> {
-        let event = ChordInputEvent {
+        let raw_event = ChordInputEvent {
             input: keys.to_vec(),
             application_id: self.handle.app_state().frontmost().frontmost()?,
         };
-        let contexts = self
-            .handle
-            .app_state()
-            .chord_package_manager()
-            .matching_chord_contexts(&event);
         self.sequence
             .lock()
-            .dispatch(&event, &contexts, triggers, keyboard_event, 1)
+            .dispatch_command(raw_event, triggers, keyboard_event, |event| {
+                self.handle
+                    .app_state()
+                    .chord_package_manager()
+                    .matching_chord_contexts(event)
+            })
     }
 
     fn dispatch_current_buffer(
@@ -226,11 +237,37 @@ impl ChordInputManager {
         }
     }
 
-    fn run_dispatch(&self, dispatch: ChordSequenceDispatch, hold_input: bool) -> Result<()> {
-        if dispatch.tasks.is_empty() && dispatch.expired.is_empty() {
+    fn run_dispatch(&self, mut dispatch: ChordSequenceDispatch, hold_input: bool) -> Result<()> {
+        if let Some(command) = dispatch.meta_command {
+            match command {
+                MetaChordCommand::Settings => self.handle.app_state().settings().ui.open()?,
+                MetaChordCommand::Reload => {
+                    self.stop_loops()?;
+                    crate::tauri_app::scripting::reload_configs(self.handle.clone());
+                }
+                MetaChordCommand::Quit => {
+                    self.stop_loops()?;
+                    self.handle.exit(0);
+                }
+                MetaChordCommand::Halt(id) => self.loops.halt(id, &self.execution_observable)?,
+            }
+        }
+        let loop_run = dispatch
+            .loop_task
+            .take()
+            .map(|task| {
+                self.loops
+                    .reserve(&task, &self.execution_observable)
+                    .map(|(id, cancelled)| (id, task, cancelled))
+            })
+            .transpose()?;
+        if dispatch.tasks.is_empty() && dispatch.expired.is_empty() && loop_run.is_none() {
             return Ok(());
         }
-        let release = if let Some(input_event) = dispatch.input_event.clone().filter(|_| hold_input)
+        let release = if let Some(input_event) = dispatch
+            .input_event
+            .clone()
+            .filter(|_| hold_input && loop_run.is_none())
         {
             self.end_active_task();
             let (sender, receiver) = oneshot::channel();
@@ -240,26 +277,64 @@ impl ChordInputManager {
             None
         };
         let handle = self.handle.clone();
+        // Expired scopes have unique IDs. Releasing them can wait behind a busy
+        // package loop, but must not stall commands in unrelated packages.
+        let expired = std::mem::take(&mut dispatch.expired);
+        let loops = self.loops.clone();
+        let execution_observable = self.execution_observable.provide();
         self.task_queue.enqueue(async move {
+            // Previous callbacks must finish creating their scopes before cleanup
+            // is scheduled. The cleanup itself need not block new callbacks.
+            if !expired.is_empty() {
+                let release_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = release_chord_sequences(release_handle, expired).await {
+                        log::error!("failed to release chord values: {error:#}");
+                    }
+                });
+            }
             let result = async {
-                release_chord_sequences(handle.clone(), dispatch.expired).await?;
                 let runner = handle.app_state().chord_action_task_runner();
                 let mut release = release;
                 let count = dispatch.tasks.len();
                 for (index, task) in dispatch.tasks.into_iter().enumerate() {
-                    let task_run = runner.start_task(&task)?;
+                    if loop_run
+                        .as_ref()
+                        .is_some_and(|(_, _, cancelled)| *cancelled.borrow())
+                    {
+                        break;
+                    }
+                    let mut task_run = runner.start_task(&task)?;
                     if index + 1 == count {
                         if let Some(release) = release.take() {
                             let _ = release.await;
                         }
                     }
-                    runner.end_task(task_run).await?;
+                    runner.end_task(&mut task_run).await?;
                 }
                 Ok::<(), anyhow::Error>(())
             }
             .await;
             if let Err(error) = result {
                 log::error!("error running chord events: {error:#}");
+                if let Some((id, task, _)) = loop_run {
+                    loops.finish(id, &execution_observable);
+                    if let ChordTaskAction::Handler(action) = task.action {
+                        if let Some(id) = action.sequence_id {
+                            tauri::async_runtime::spawn(release_chord_sequences(handle, vec![id]));
+                        }
+                    }
+                }
+            } else if let Some((id, task, cancelled)) = loop_run {
+                // Only the initializer stays in the ordered event queue. The loop must
+                // never keep a later chord or its halt command waiting on that queue.
+                tauri::async_runtime::spawn(async move {
+                    let result = run_loop(handle, task, cancelled).await;
+                    loops.finish(id, &execution_observable);
+                    if let Err(error) = result {
+                        log::error!("chord loop {id} stopped: {error:#}");
+                    }
+                });
             }
         });
         Ok(())
@@ -311,7 +386,7 @@ impl ChordInputManager {
         let mut next_key_buffer = key_buffer.to_vec();
         if key.0 == KeyMappingCode::Backspace {
             next_key_buffer.pop();
-        } else if key.to_sequence_char().is_some() {
+        } else if Key::serialize_sequence(&[*key]).is_some() {
             next_key_buffer.push(*key);
         }
         next_key_buffer
@@ -408,16 +483,21 @@ mod tests {
             ),
             Key::parse_sequence("j,").unwrap()
         );
-        for key in [
-            KeyMappingCode::ArrowLeft,
-            KeyMappingCode::Enter,
-            KeyMappingCode::ShiftLeft,
-        ] {
+        for key in [KeyMappingCode::Enter, KeyMappingCode::ShiftLeft] {
             assert_eq!(
                 ChordInputManager::next_key_buffer_for_unshifted_press(&buffer, &Key(key)),
                 buffer
             );
         }
+        let mut with_arrow = buffer.clone();
+        with_arrow.push(Key(KeyMappingCode::ArrowLeft));
+        assert_eq!(
+            ChordInputManager::next_key_buffer_for_unshifted_press(
+                &buffer,
+                &Key(KeyMappingCode::ArrowLeft)
+            ),
+            with_arrow
+        );
         assert!(
             ChordInputManager::next_key_buffer_for_unshifted_press(
                 &[],

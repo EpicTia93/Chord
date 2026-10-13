@@ -236,8 +236,10 @@ The runtime integration lives in `src-tauri/src/bun_js/` and exposes the
 installed JavaScript package; it never executes package JavaScript or loads
 package native add-ons in the GUI process. The hidden `__package-worker` CLI
 command owns each persistent VM and its native UI event loop. State and keyboard
-host APIs use authenticated, bounded IPC. Crashed workers stay disabled until
-configuration reload; failed actions are not replayed. See the
+host APIs use authenticated, bounded IPC. A stable supervisor replaces crashed
+workers and restores handler factories in registration order without configuration
+reload. Handler IDs remain valid; failed actions are not replayed. Repeated failures
+use exponential backoff from 250 ms to 30 seconds, resetting after a healthy minute. See the
 [isolation regression](apps/chord-tauri/src-tauri/tests/package-isolation/README.md).
 The CLI uses the same embedded runtime:
 

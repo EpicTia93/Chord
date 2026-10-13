@@ -1,6 +1,9 @@
 use crate::app::chord_package_manager::{ChordPackage, ChordReference};
 use crate::app::chord_runner::ChordActionTask;
-use crate::models::{ChordAction, ChordEventTrigger, ChordInputEvent, ChordKeyboardEvent};
+use crate::models::{
+    ChordAction, ChordCommand, ChordEventTrigger, ChordInputEvent, ChordKeyboardEvent, ChordRepeat,
+    ChordTaskAction, MetaChordCommand,
+};
 use anyhow::Result;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -40,11 +43,69 @@ pub(super) struct ChordSequenceDispatch {
     pub tasks: Vec<ChordActionTask>,
     pub expired: Vec<String>,
     pub input_event: Option<ChordInputEvent>,
+    pub meta_command: Option<MetaChordCommand>,
+    pub loop_task: Option<ChordActionTask>,
 }
 
 impl ChordSequence {
+    pub fn dispatch_command(
+        &mut self,
+        raw_event: ChordInputEvent,
+        triggers: &[ChordEventTrigger],
+        keyboard_event: Option<&ChordKeyboardEvent>,
+        matching: impl FnOnce(&ChordInputEvent) -> Vec<(ChordPackage, ChordReference)>,
+    ) -> Result<ChordSequenceDispatch> {
+        let (keys, repeat) = match ChordCommand::parse(&raw_event.input)? {
+            ChordCommand::Meta(command) => {
+                let command = command.filter(|_| triggers.contains(&ChordEventTrigger::Input));
+                return Ok(ChordSequenceDispatch {
+                    expired: self.reset(),
+                    input_event: command.map(|_| raw_event),
+                    meta_command: command,
+                    ..Default::default()
+                });
+            }
+            ChordCommand::Pending => {
+                return Ok(ChordSequenceDispatch {
+                    expired: self.reset(),
+                    ..Default::default()
+                });
+            }
+            ChordCommand::Run { keys, repeat } => (keys, repeat),
+        };
+        let event = ChordInputEvent {
+            input: keys,
+            application_id: raw_event.application_id.clone(),
+        };
+        let contexts = matching(&event);
+        let num_times = match repeat {
+            ChordRepeat::Times(count) => count,
+            ChordRepeat::Loop => 1,
+        };
+        let mut dispatch = self.dispatch(&event, &contexts, triggers, keyboard_event, num_times)?;
+        if dispatch.input_event.is_some() {
+            dispatch.input_event = Some(raw_event);
+            if repeat == ChordRepeat::Loop {
+                if let Some(task) = dispatch.tasks.pop() {
+                    if let ChordTaskAction::Handler(action) = &task.action {
+                        if let Some(id) = &action.sequence_id {
+                            self.detach(id);
+                        }
+                    }
+                    dispatch.loop_task = Some(task);
+                }
+            }
+        }
+        Ok(dispatch)
+    }
+
     pub fn reset(&mut self) -> Vec<String> {
         self.active.drain().map(|(_, id)| id).collect()
+    }
+
+    /// A background loop owns its persistent values until it halts or fails.
+    pub fn detach(&mut self, id: &str) {
+        self.active.retain(|_, active_id| active_id != id);
     }
 
     pub fn dispatch(
@@ -275,8 +336,13 @@ name = "Instagram"
         );
         for input in ["hs.12", "hsr12"] {
             let input_event = event(input);
-            let reference = package.resolve_chord_from_input_event(&input_event).unwrap();
-            let task = package.resolve_task(input_event, reference, 1).unwrap().unwrap();
+            let reference = package
+                .resolve_chord_from_input_event(&input_event)
+                .unwrap();
+            let task = package
+                .resolve_task(input_event, reference, 1)
+                .unwrap()
+                .unwrap();
             let ChordTaskAction::Handler(action) = task.action else {
                 panic!("expected Instagram handler");
             };
@@ -285,7 +351,11 @@ name = "Instagram"
             assert_eq!(action.event_args, vec!["story".into(), "12".into()]);
         }
         for input in ["hs,12", "xhsr12", "hsr12x", "hsr"] {
-            assert!(package.resolve_chord_from_input_event(&event(input)).is_none());
+            assert!(
+                package
+                    .resolve_chord_from_input_event(&event(input))
+                    .is_none()
+            );
         }
     }
 
@@ -430,6 +500,80 @@ name = "fixture"
             ChordTaskAction::Shortcut(_)
         ));
         assert!(sequence.reset().is_empty());
+    }
+
+    #[test]
+    fn repeated_input_keeps_capture_arguments_and_initializes_only_once() {
+        let package = fixture(
+            r#"name = 'fixture'
+[chords]
+'hsr(\d+)' = { '@init:prepare=state' = [], '@input:input' = ['$state', '$1'] }
+"#,
+        );
+        let mut sequence = ChordSequence::default();
+        let raw = event("12hsr34");
+        let dispatch = sequence
+            .dispatch_command(raw.clone(), &[ChordEventTrigger::Input], None, |e| {
+                contexts(&package, e)
+            })
+            .unwrap();
+        assert_eq!(handlers(&dispatch), ["prepare", "input"]);
+        assert_eq!(dispatch.tasks[0].num_times, 1);
+        assert_eq!(dispatch.tasks[1].num_times, 12);
+        assert_eq!(dispatch.input_event, Some(raw));
+        let ChordTaskAction::Handler(action) = &dispatch.tasks[1].action else {
+            panic!()
+        };
+        assert_eq!(action.input, "hsr34");
+        assert_eq!(action.event_args, ["$state".into(), "34".into()]);
+    }
+
+    #[test]
+    fn loop_scopes_survive_buffer_reset_and_meta_commands_bypass_packages() {
+        let package = fixture(
+            "name = 'fixture'\n[chords]\nab = { '@init:prepare=state' = [], '@input:input' = ['$state'] }",
+        );
+        let mut sequence = ChordSequence::default();
+        let dispatch = sequence
+            .dispatch_command(event("1ab"), &[ChordEventTrigger::Input], None, |e| {
+                contexts(&package, e)
+            })
+            .unwrap();
+        assert_eq!(handlers(&dispatch), ["prepare"]);
+        let task = dispatch.loop_task.unwrap();
+        assert_eq!(task.num_times, 1);
+        let ChordTaskAction::Handler(action) = &task.action else {
+            panic!()
+        };
+        assert!(action.sequence_id.is_some());
+        assert!(sequence.reset().is_empty());
+        let later = sequence
+            .dispatch_command(event("ab"), &[ChordEventTrigger::Input], None, |e| {
+                contexts(&package, e)
+            })
+            .unwrap();
+        let ChordTaskAction::Handler(later_action) = &later.tasks[0].action else {
+            panic!()
+        };
+        assert_ne!(later_action.sequence_id, action.sequence_id);
+        for input in ["0s", "0r", "0q", "0h12", "0x", "0h12x"] {
+            let dispatch = sequence
+                .dispatch_command(event(input), &[ChordEventTrigger::Input], None, |_| {
+                    panic!("meta commands must not visit packages")
+                })
+                .unwrap();
+            assert!(dispatch.tasks.is_empty() && dispatch.loop_task.is_none());
+            assert_eq!(
+                dispatch.input_event.is_some(),
+                !["0x", "0h12x"].contains(&input)
+            );
+        }
+        let typing = sequence
+            .dispatch_command(event("0s"), &[ChordEventTrigger::Keydown], None, |_| {
+                panic!("meta commands must not visit packages")
+            })
+            .unwrap();
+        assert!(typing.meta_command.is_none());
     }
 
     #[tokio::test]

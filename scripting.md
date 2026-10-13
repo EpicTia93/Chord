@@ -12,6 +12,46 @@ TODO
 
 ## Chord events and persistent return values
 
+### Meta commands, repetition, and special keys
+
+The leading `0` namespace belongs to Chord in every focused app. Packages and user
+configuration cannot define `0` commands or hints, and user regexes cannot intercept
+them. Complete built-in commands with the normal chord completion controls or the CLI:
+
+| Command | Action |
+| --- | --- |
+| `0s` | Open Chord Settings |
+| `0r` | Reload configuration and stop active loops |
+| `0q` | Quit Chord |
+| `0h<ID>` | Halt the loop with that numeric ID, for example `0h12` |
+
+These replace the former backslash Settings, Reload, and Quit sequences.
+
+Leading decimal digits set a chord's repeat count: `12ab` executes `ab` twelve times.
+Without a prefix the chord executes once; the prefix `1` starts an indefinite loop.
+For example, `1ab` keeps executing `ab` after the keys are released, chord mode ends,
+or another chord runs. Each loop receives a distinct ID displayed in the chord panel
+alongside its `0h<ID>` command. Halting a loop stops further iterations. An in-flight
+JavaScript callback finishes before its values are released, preserving other handlers
+in the same package worker. Shell commands are cancelled and simulated shortcut keys
+are released. A failed iteration ends its loop; configuration reload and quitting stop
+all loops. IDs are not reused during an app session.
+
+Repeat counts apply to completed input actions; init and keyboard callbacks still run
+once per matching interval or keyboard event. Regex capture arguments exclude the
+repeat prefix: `12hsr34` runs `hsr34` twelve times with `$1` equal to `34`. Handlers
+receive the underlying command as `this.input`, excluding the repeat prefix. Loop
+iterations share their initialization values until halted. Iterations are sequential,
+with a 10 ms pause between them so immediate actions leave time for other input.
+
+Backslash introduces special-key notation: `\up`, `\left`, `\down`, and `\right`
+represent arrow keys in TOML triggers and CLI sequences. For example, `'a\up'`
+matches `a` followed by the Up arrow, or the typed escape sequence. Use literal TOML
+strings (single quotes) to preserve backslashes. Backspace continues to edit the chord
+buffer.
+
+### Handler events
+
 Chord actions use `@trigger:event`, with an optional `=identifier` to retain the handler's return value:
 
 ```toml
@@ -92,11 +132,23 @@ export function getAppWindows(bundleId: string): {
   bounds: WindowBounds;
   title: string | null;
 }[];
+export function getScreenBounds(): WindowBounds;
+export function mouse(options: {
+  action: "click" | "down" | "move" | "up";
+  windowId?: number;
+  x?: number;
+  y?: number;
+  expectedBounds?: WindowBounds;
+  button?: "left" | "right" | "middle";
+  clickCount?: 1 | 2;
+  pressDurationMs?: number;
+}): Promise<void>;
 export function click(options: {
   windowId: number;
   x: number;
   y: number;
   expectedBounds?: WindowBounds;
+  moveCursor?: boolean;
   button?: "left" | "right" | "middle";
   clickCount?: 1 | 2;
   pressDurationMs?: number;
@@ -128,7 +180,9 @@ can be null when macOS does not expose them. Select the intended window before s
 `button` selects left, right, or middle, and `clickCount: 2` sends a double click.
 `pressDurationMs` sets the hold duration (default 80 ms, accepted range 1–5000 ms). `x` and `y` are window-local macOS
 logical screen points measured from its top-left corner; they are independent of Retina scaling.
-The helper preserves the Mac pointer and foreground app. Optional `expectedBounds` rejects a
+The helper preserves the foreground app and, by default, the Mac pointer. `moveCursor: true`
+moves the pointer to the target point after validation while events still go directly to the
+window; it never clicks through the cursor. Optional `expectedBounds` rejects a
 window that has moved or resized since coordinates were calculated. Invalid coordinates, missing
 windows, denied Accessibility access, and unavailable private APIs reject the Promise.
 These helpers work in both the app and `chord bun` CLI mode; they do not require an app context.
@@ -152,7 +206,25 @@ helper holds the button for 80 ms and should run on a worker thread. Chord's JS 
 automatically. The macOS implementation uses `NSEvent`'s window number, both window-under-pointer
 fields, mouse subtype 3, and Command on background events, stamps window-local coordinates through
 the private `CGEventSetWindowLocation` symbol, then calls `CGEventPostToPid`. It never posts a mouse
-move or activates the target, and does not fall back to cursor-moving input if the SPI is missing.
+move event or activates the target. An explicitly requested cursor move uses
+`CGWarpMouseCursorPosition` before the window-targeted button events. It does not fall back to
+cursor-based clicks if the SPI is missing.
+
+`mouse` adds separate button-down, movement, and button-up operations. Supply
+`windowId` for window-local input with the same targeting and geometry checks as
+`click`; omit it for ordinary global macOS points. Global input reaches the visible
+app under the pointer and can activate it. `getScreenBounds` returns the display
+containing the pointer, using macOS logical points and including negative display
+origins. Resolve all coordinates against a captured set of bounds before sending
+input.
+
+After `down`, `move` sends the corresponding left/right/middle dragged event.
+`up` releases at the most recent successful point, even if the window has since
+moved or disappeared. Mouse sessions belong to each package worker's host
+connection; errors and worker disconnection release held buttons. A later normal
+cursor-moving click releases a latched button before clicking. A `down` can stay
+held across handler invocations; authors should otherwise release it in `finally`.
+Standalone scripts share a session during their invocation and release it on exit.
 This private recipe was verified on macOS 26.5.2; its availability and behavior can change with OS updates.
 
 ## URL Scheme
@@ -312,7 +384,8 @@ declare module "*/beep.node" {
 - The plugin packages each configured target triple and selects the matching platform and architecture at runtime. Static imports load the addon with the handler module; a `require("./beep.node")` inside a function keeps loading lazy. Generated native asset URLs are relative to the emitted JavaScript, including after vendoring.
 - Existing handlers may still use `import.meta.chord.resolveNative("beep")`, which resolves `target/<Chord's triple>/beep/beep.node`. `import.meta.chord.resolvePackageFile("any/relative/path")` resolves arbitrary package files. Both remain bound to the calling module's logical package.
 - Each installed package runs in its own supervised process with a persistent embedded Bun VM. Imports, handler factories, lifecycle callbacks, timers, and native add-ons all stay in that process. On macOS the worker services AppKit events and Swift's `@MainActor`; keep NodeAPI values on `@NodeActor` and pass Swift values to the main actor. Return or await native Promises so Chord waits for completion and reports errors.
-- JavaScript and Swift exceptions are reported as handler errors. A native abort, bad pointer, or `process.exit()` terminates only the package worker. Chord disables that worker until configuration reload, leaves other packages running, and never replays the failed action. Setup and health checks have a 15-second deadline; actions and lifecycle callbacks have a five-minute deadline for interactive UI.
+- JavaScript and Swift exceptions are reported as handler errors. A native abort, bad pointer, or `process.exit()` terminates only the package worker. Its supervisor automatically starts a fresh VM and restores the registered handler factories in their original order. Existing handler IDs remain usable, other packages keep running, and the interrupted action is never replayed. Repeated crashes or startup failures use exponential backoff from 250 ms to 30 seconds, resetting after a healthy minute. Setup and health checks have a 15-second deadline; actions and lifecycle callbacks have a five-minute deadline for interactive UI.
+- Recovery resets the package's JavaScript globals, sequence return values, timers, and native state. Factories run again to rebuild handlers and lifecycle subscriptions; keep factories suitable for reinitialization. Unloading/reloading configuration and quitting stop the supervisor and prevent it from respawning workers.
 - Reloading configuration replaces package workers, so rebuilt JavaScript, transitive imports, and native add-ons are loaded into fresh VMs. Return-value assignments preserve JavaScript object identity inside the package's VM between events in the same matching interval.
 - Workers retain the user's filesystem and process access; this is crash isolation, not a permissions sandbox.
 - Package stdout and stderr inherit Chord's log streams.
@@ -369,7 +442,7 @@ chord bun scripts/run.ts by-letters f     # from the chords-menu checkout
 - Native loading failures name the missing file or Node-API registration problem; run `vp pack` and check that the packaged addon and `libNodeAPI.dylib` under `js/native/<your triple>/` are included and that the `#NodeModule` export names match the TypeScript binding.
 - Node-API add-ons run in Chord's embedded Bun runtime; check that the add-on targets Bun's supported Node-API surface.
 - Accessibility calls inherit Chord's Accessibility permission—grant it to Chord.
-- A native crash disables that package worker until configuration reload. Run the handler from the CLI while developing to inspect its diagnostics.
+- A native crash reports failure for the interrupted action; the worker restarts automatically for later actions. Run the handler from the CLI while developing to inspect its diagnostics.
 
 ## FAQ
 

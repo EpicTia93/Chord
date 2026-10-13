@@ -132,11 +132,8 @@ impl ChordPackage {
                     ChordTrigger::Pattern(regex) => {
                         // Replace all $1, $2, ... with the captured match from the regex
                         let mut args = Vec::new();
-                        let input_string = event
-                            .input
-                            .iter()
-                            .map(|k| k.to_char(false).unwrap_or_default())
-                            .collect::<String>();
+                        let input_string = Key::serialize_sequence(&event.input)
+                            .context("invalid chord sequence")?;
 
                         log::debug!(
                             "replacing capture args with regex {:?} matching {}",

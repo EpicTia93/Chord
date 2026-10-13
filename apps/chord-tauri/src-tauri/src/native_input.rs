@@ -1,5 +1,5 @@
 //! Window-targeted mouse input shared by Rust callers and the built-in `chord` module.
-//! Coordinates are top-left window-local macOS points. No cursor movement or activation.
+//! Coordinates are top-left window-local macOS points. Cursor movement is optional; no activation.
 
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,9 @@ pub struct ClickOptions {
     pub y: f64,
     /// If supplied, reject a window that moved or resized since the caller resolved coordinates.
     pub expected_bounds: Option<WindowBounds>,
+    /// Move the cursor to the resolved screen point while keeping clicks window-targeted.
+    #[serde(default)]
+    pub move_cursor: bool,
     #[serde(default)]
     pub button: MouseButton,
     #[serde(default = "default_click_count")]
@@ -47,13 +50,167 @@ pub struct ClickOptions {
     pub press_duration_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MouseButton {
     #[default]
     Left,
     Right,
     Middle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MouseAction {
+    Click,
+    Down,
+    Move,
+    Up,
+}
+
+/// A missing window ID selects ordinary global input, including normal focus changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MouseOptions {
+    pub action: MouseAction,
+    pub window_id: Option<u32>,
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    pub expected_bounds: Option<WindowBounds>,
+    #[serde(default)]
+    pub button: MouseButton,
+    #[serde(default = "default_click_count")]
+    pub click_count: u8,
+    #[serde(default = "default_press_duration")]
+    pub press_duration_ms: u64,
+}
+
+impl MouseOptions {
+    fn validate(&self) -> Result<()> {
+        if self.action == MouseAction::Up {
+            return Ok(());
+        }
+        ensure!(
+            self.x.is_finite() && self.y.is_finite(),
+            "mouse coordinates must be finite"
+        );
+        ensure!(
+            (1..=2).contains(&self.click_count),
+            "clickCount must be 1 or 2"
+        );
+        ensure!(
+            (1..=5_000).contains(&self.press_duration_ms),
+            "pressDurationMs must be between 1 and 5000"
+        );
+        if self.window_id.is_some() {
+            self.click_options().validate()?;
+        }
+        Ok(())
+    }
+
+    fn click_options(&self) -> ClickOptions {
+        ClickOptions {
+            window_id: self.window_id.unwrap_or_default(),
+            x: self.x,
+            y: self.y,
+            expected_bounds: self.expected_bounds,
+            move_cursor: true,
+            button: self.button,
+            click_count: self.click_count,
+            press_duration_ms: self.press_duration_ms,
+        }
+    }
+}
+
+/// Owned by the host connection, so worker termination also releases latched buttons.
+#[derive(Default)]
+pub struct MouseSession {
+    #[cfg(target_os = "macos")]
+    held: Option<macos::HeldMouse>,
+}
+
+impl MouseSession {
+    pub fn apply(&mut self, options: &MouseOptions) -> Result<()> {
+        let result = options.validate().and_then(|_| {
+            #[cfg(target_os = "macos")]
+            return macos::mouse(self, options);
+            #[cfg(not(target_os = "macos"))]
+            anyhow::bail!("mouse input is only supported on macOS");
+        });
+        if result.is_err() {
+            self.release();
+        }
+        result
+    }
+
+    pub fn release(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let Some(held) = self.held.take() {
+            held.release();
+        }
+    }
+}
+
+impl Drop for MouseSession {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Bounds of the display containing the pointer, in global macOS logical points.
+pub fn get_screen_bounds() -> Result<WindowBounds> {
+    #[cfg(target_os = "macos")]
+    return macos::get_screen_bounds();
+    #[cfg(not(target_os = "macos"))]
+    anyhow::bail!("screen bounds are only supported on macOS");
+}
+
+/// Standalone CLI scripts share a session across asynchronous native calls.
+type StandaloneMouseRequest = (
+    Option<MouseOptions>,
+    std::sync::mpsc::SyncSender<Result<()>>,
+);
+static STANDALONE_MOUSE: std::sync::OnceLock<std::sync::mpsc::Sender<StandaloneMouseRequest>> =
+    std::sync::OnceLock::new();
+
+pub fn standalone_mouse(options: &MouseOptions) -> Result<()> {
+    let session = STANDALONE_MOUSE.get_or_init(|| {
+        let (send, receive) = std::sync::mpsc::channel::<StandaloneMouseRequest>();
+        // CGEvents stay on their owning thread, including preconstructed releases.
+        std::thread::spawn(move || {
+            let mut mouse = MouseSession::default();
+            for (options, reply) in receive {
+                let result = if let Some(options) = options {
+                    mouse.apply(&options)
+                } else {
+                    mouse.release();
+                    Ok(())
+                };
+                if reply.send(result).is_err() {
+                    mouse.release();
+                }
+            }
+        });
+        send
+    });
+    let (reply, result) = std::sync::mpsc::sync_channel(1);
+    session
+        .send((Some(options.clone()), reply))
+        .map_err(|_| anyhow::anyhow!("mouse thread stopped"))?;
+    result
+        .recv()
+        .map_err(|_| anyhow::anyhow!("mouse thread stopped"))?
+}
+
+pub fn release_standalone_mouse() {
+    if let Some(session) = STANDALONE_MOUSE.get() {
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        if session.send((None, reply)).is_ok() {
+            let _ = result.recv();
+        }
+    }
 }
 
 fn default_click_count() -> u8 {
@@ -132,9 +289,10 @@ mod macos {
         CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint,
     };
     use objc2_core_graphics::{
-        CGEvent, CGEventField, CGPreflightPostEventAccess, CGWindowListCopyWindowInfo,
-        CGWindowListOption, kCGNullWindowID, kCGWindowBounds, kCGWindowLayer, kCGWindowName,
-        kCGWindowNumber, kCGWindowOwnerPID,
+        CGDisplayBounds, CGError, CGEvent, CGEventField, CGEventTapLocation, CGEventType,
+        CGGetDisplaysWithPoint, CGMainDisplayID, CGMouseButton, CGPreflightPostEventAccess,
+        CGWarpMouseCursorPosition, CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID,
+        kCGWindowBounds, kCGWindowLayer, kCGWindowName, kCGWindowNumber, kCGWindowOwnerPID,
     };
     use objc2_foundation::{NSPoint, NSProcessInfo, NSString};
     use std::ffi::c_void;
@@ -356,6 +514,14 @@ mod macos {
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?;
+            if options.move_cursor {
+                let point = CGPoint::new(window.bounds.x + options.x, window.bounds.y + options.y);
+                let error = CGWarpMouseCursorPosition(point);
+                ensure!(
+                    error == CGError::Success,
+                    "could not move cursor (CG error {error:?})"
+                );
+            }
             for (index, (down, up)) in events.iter().enumerate() {
                 if index > 0 {
                     let current = windows()?
@@ -388,9 +554,306 @@ mod macos {
         CGEvent::post_to_pid(pid, Some(event));
     }
 
+    pub(super) fn get_screen_bounds() -> Result<WindowBounds> {
+        let pointer = CGEvent::new(None).context("could not read cursor position")?;
+        let mut display = CGMainDisplayID();
+        let mut count = 0;
+        // SAFETY: both output pointers refer to live stack values, capacity is one.
+        let error = unsafe {
+            CGGetDisplaysWithPoint(
+                CGEvent::location(Some(&pointer)),
+                1,
+                &mut display,
+                &mut count,
+            )
+        };
+        ensure!(error == CGError::Success, "could not find cursor display");
+        if count == 0 {
+            display = CGMainDisplayID();
+        }
+        let frame = CGDisplayBounds(display);
+        let bounds = WindowBounds {
+            x: frame.origin.x,
+            y: frame.origin.y,
+            width: frame.size.width,
+            height: frame.size.height,
+        };
+        ensure!(bounds.is_valid(), "display has invalid bounds");
+        Ok(bounds)
+    }
+
+    pub(super) struct HeldMouse {
+        window: Option<NativeWindow>,
+        button: MouseButton,
+        up: CFRetained<CGEvent>,
+    }
+
+    impl HeldMouse {
+        pub(super) fn release(self) {
+            autoreleasepool(|_| post_input(self.window.as_ref(), &self.up));
+        }
+    }
+
+    fn post_input(window: Option<&NativeWindow>, event: &CGEvent) {
+        if let Some(window) = window {
+            post_mouse_event(window.process_id, event);
+        } else {
+            CGEvent::set_timestamp(
+                Some(event),
+                (NSProcessInfo::processInfo().systemUptime() * 1_000_000_000.0) as u64,
+            );
+            CGEvent::post(CGEventTapLocation::HIDEventTap, Some(event));
+        }
+    }
+
+    fn input_event(
+        window: Option<&NativeWindow>,
+        options: &MouseOptions,
+        kind: CGEventType,
+        button: MouseButton,
+    ) -> Result<CFRetained<CGEvent>> {
+        let number = match button {
+            MouseButton::Left => 0,
+            MouseButton::Right => 1,
+            MouseButton::Middle => 2,
+        };
+        if let Some(window) = window {
+            let mut click = options.click_options();
+            click.button = button;
+            let event = mouse_event(
+                window,
+                &click,
+                kind == event_kind(button, MouseAction::Down),
+                options.click_count,
+                !is_frontmost(window.process_id)?,
+                window_location_setter()?,
+            )?;
+            CGEvent::set_type(Some(&event), kind);
+            CGEvent::set_double_value_field(
+                Some(&event),
+                CGEventField::MouseEventPressure,
+                if matches!(
+                    kind,
+                    CGEventType::LeftMouseDown
+                        | CGEventType::RightMouseDown
+                        | CGEventType::OtherMouseDown
+                        | CGEventType::LeftMouseDragged
+                        | CGEventType::RightMouseDragged
+                        | CGEventType::OtherMouseDragged
+                ) {
+                    1.0
+                } else {
+                    0.0
+                },
+            );
+            Ok(event)
+        } else {
+            let event = CGEvent::new_mouse_event(
+                None,
+                kind,
+                CGPoint::new(options.x, options.y),
+                CGMouseButton(number),
+            )
+            .context("could not create global mouse event")?;
+            CGEvent::set_integer_value_field(
+                Some(&event),
+                CGEventField::MouseEventClickState,
+                options.click_count.into(),
+            );
+            Ok(event)
+        }
+    }
+
+    fn event_kind(button: MouseButton, action: MouseAction) -> CGEventType {
+        match (button, action) {
+            (MouseButton::Left, MouseAction::Down) => CGEventType::LeftMouseDown,
+            (MouseButton::Right, MouseAction::Down) => CGEventType::RightMouseDown,
+            (MouseButton::Middle, MouseAction::Down) => CGEventType::OtherMouseDown,
+            (MouseButton::Left, MouseAction::Move) => CGEventType::LeftMouseDragged,
+            (MouseButton::Right, MouseAction::Move) => CGEventType::RightMouseDragged,
+            (MouseButton::Middle, MouseAction::Move) => CGEventType::OtherMouseDragged,
+            (MouseButton::Left, _) => CGEventType::LeftMouseUp,
+            (MouseButton::Right, _) => CGEventType::RightMouseUp,
+            (MouseButton::Middle, _) => CGEventType::OtherMouseUp,
+        }
+    }
+
+    pub(super) fn mouse(session: &mut MouseSession, options: &MouseOptions) -> Result<()> {
+        autoreleasepool(|_| {
+            if options.action == MouseAction::Up {
+                session.release();
+                return Ok(());
+            }
+            ensure!(
+                CGPreflightPostEventAccess(),
+                "Accessibility permission is required for mouse input"
+            );
+            let window = options
+                .window_id
+                .map(|id| -> Result<_> {
+                    let window = windows()?
+                        .into_iter()
+                        .find(|w| w.window_id == id)
+                        .context("target window is no longer on-screen")?;
+                    options.click_options().validate_window(&window)?;
+                    Ok(window)
+                })
+                .transpose()?;
+            if options.action == MouseAction::Click {
+                session.release();
+                if window.is_some() {
+                    return click(&options.click_options());
+                }
+                // Prepare all releases before sending any global input.
+                let mut clicks = Vec::new();
+                for count in 1..=options.click_count {
+                    let counted = MouseOptions {
+                        click_count: count,
+                        ..options.clone()
+                    };
+                    clicks.push((
+                        input_event(
+                            None,
+                            &counted,
+                            event_kind(options.button, MouseAction::Down),
+                            options.button,
+                        )?,
+                        input_event(
+                            None,
+                            &counted,
+                            event_kind(options.button, MouseAction::Up),
+                            options.button,
+                        )?,
+                    ));
+                }
+                for (index, (down, up)) in clicks.iter().enumerate() {
+                    post_input(None, down);
+                    std::thread::sleep(Duration::from_millis(options.press_duration_ms));
+                    post_input(None, up);
+                    if index + 1 < clicks.len() {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+                return Ok(());
+            }
+            if options.action == MouseAction::Down {
+                session.release();
+            }
+            if let Some(held) = &session.held {
+                ensure!(
+                    held.window.as_ref().map(|w| w.window_id) == options.window_id,
+                    "a drag must remain in its original coordinate scope"
+                );
+                if let (Some(original), Some(current)) = (&held.window, &window) {
+                    ensure!(
+                        original.bounds == current.bounds
+                            && original.process_id == current.process_id,
+                        "target window moved or resized"
+                    );
+                }
+            }
+            let button = session
+                .held
+                .as_ref()
+                .map_or(options.button, |held| held.button);
+            let dragging = options.action == MouseAction::Move && session.held.is_some();
+            let kind = if options.action == MouseAction::Move && !dragging {
+                CGEventType::MouseMoved
+            } else {
+                event_kind(button, options.action)
+            };
+            let event = input_event(window.as_ref(), options, kind, button)?;
+            let up = if options.action == MouseAction::Down || dragging {
+                Some(input_event(
+                    window.as_ref(),
+                    options,
+                    event_kind(button, MouseAction::Up),
+                    button,
+                )?)
+            } else {
+                None
+            };
+            if let Some(window) = &window {
+                let error = CGWarpMouseCursorPosition(CGPoint::new(
+                    window.bounds.x + options.x,
+                    window.bounds.y + options.y,
+                ));
+                ensure!(
+                    error == CGError::Success,
+                    "could not move cursor (CG error {error:?})"
+                );
+            }
+            if options.action == MouseAction::Down {
+                session.held = Some(HeldMouse {
+                    window: window.clone(),
+                    button,
+                    up: up.unwrap(),
+                });
+            } else if let (Some(held), Some(up)) = (&mut session.held, up) {
+                held.up = up;
+            }
+            post_input(window.as_ref(), &event);
+            Ok(())
+        })
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn constructs_global_drag_events_with_signed_coordinates_without_posting() {
+            let options: MouseOptions =
+                serde_json::from_str(r#"{"action":"move","x":-420.5,"y":-10.25}"#).unwrap();
+            for (button, number, down, drag, up) in [
+                (
+                    MouseButton::Left,
+                    0,
+                    CGEventType::LeftMouseDown,
+                    CGEventType::LeftMouseDragged,
+                    CGEventType::LeftMouseUp,
+                ),
+                (
+                    MouseButton::Right,
+                    1,
+                    CGEventType::RightMouseDown,
+                    CGEventType::RightMouseDragged,
+                    CGEventType::RightMouseUp,
+                ),
+                (
+                    MouseButton::Middle,
+                    2,
+                    CGEventType::OtherMouseDown,
+                    CGEventType::OtherMouseDragged,
+                    CGEventType::OtherMouseUp,
+                ),
+            ] {
+                for (action, expected) in [
+                    (MouseAction::Down, down),
+                    (MouseAction::Move, drag),
+                    (MouseAction::Up, up),
+                ] {
+                    let kind = event_kind(button, action);
+                    assert_eq!(kind, expected);
+                    let event = input_event(None, &options, kind, button).unwrap();
+                    assert_eq!(CGEvent::r#type(Some(&event)), expected);
+                    assert_eq!(
+                        CGEvent::location(Some(&event)),
+                        CGPoint::new(-420.5, -10.25)
+                    );
+                    assert_eq!(
+                        CGEvent::integer_value_field(
+                            Some(&event),
+                            CGEventField::MouseEventButtonNumber
+                        ),
+                        number
+                    );
+                }
+            }
+            let event =
+                input_event(None, &options, CGEventType::MouseMoved, MouseButton::Left).unwrap();
+            assert_eq!(CGEvent::r#type(Some(&event)), CGEventType::MouseMoved);
+        }
 
         #[test]
         fn constructs_window_targeted_events_without_posting_input() {
@@ -422,6 +885,7 @@ mod macos {
                                 x: 30.5,
                                 y: 40.25,
                                 expected_bounds: None,
+                                move_cursor: false,
                                 button,
                                 click_count: count,
                                 press_duration_ms: 80,
@@ -504,12 +968,61 @@ mod tests {
     }
 
     #[test]
+    fn mouse_options_distinguish_global_points_window_offsets_and_cleanup() {
+        let global: MouseOptions =
+            serde_json::from_str(r#"{"action":"move","x":-500,"y":-20}"#).unwrap();
+        assert!(global.validate().is_ok());
+        assert!(
+            MouseOptions {
+                window_id: Some(123),
+                ..global.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MouseOptions {
+                x: f64::NAN,
+                ..global.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MouseOptions {
+                action: MouseAction::Up,
+                x: f64::NAN,
+                window_id: Some(0),
+                ..global.clone()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(serde_json::from_str::<MouseOptions>(r#"{"action":"drag"}"#).is_err());
+        assert!(
+            serde_json::from_str::<MouseOptions>(r#"{"action":"down","button":"unknown"}"#)
+                .is_err()
+        );
+        let local: MouseOptions = serde_json::from_str(
+            r#"{"action":"down","windowId":123,"x":30,"y":20,"button":"middle"}"#,
+        )
+        .unwrap();
+        assert!(local.click_options().validate_window(&window()).is_ok());
+        assert_eq!(local.click_options().button, MouseButton::Middle);
+    }
+
+    #[test]
     fn defaults_to_one_left_click_and_validates_button_count_and_hold_duration() {
         let options: ClickOptions =
             serde_json::from_str(r#"{"windowId":123,"x":30,"y":20}"#).unwrap();
         assert_eq!(options.button, MouseButton::Left);
         assert_eq!(options.click_count, 1);
         assert_eq!(options.press_duration_ms, 80);
+        assert!(!options.move_cursor);
+        let visible: ClickOptions =
+            serde_json::from_str(r#"{"windowId":123,"x":30,"y":20,"moveCursor":true}"#).unwrap();
+        assert!(visible.move_cursor);
+        assert!(visible.validate_window(&window()).is_ok());
         for (button, count, hold) in [
             (MouseButton::Right, 1, 80),
             (MouseButton::Middle, 1, 80),
@@ -556,6 +1069,7 @@ mod tests {
                     button: MouseButton::Left,
                     click_count: 1,
                     press_duration_ms: 80,
+                    move_cursor: true,
                     x,
                     y,
                     expected_bounds: Some(window.bounds)
@@ -577,6 +1091,7 @@ mod tests {
                     button: MouseButton::Left,
                     click_count: 1,
                     press_duration_ms: 80,
+                    move_cursor: true,
                     x,
                     y,
                     expected_bounds: None
@@ -591,6 +1106,7 @@ mod tests {
                 button: MouseButton::Left,
                 click_count: 1,
                 press_duration_ms: 80,
+                move_cursor: true,
                 x: 0.0,
                 y: 0.0,
                 expected_bounds: None
@@ -618,6 +1134,7 @@ mod tests {
                     button: MouseButton::Left,
                     click_count: 1,
                     press_duration_ms: 80,
+                    move_cursor: true,
                     x: 1.0,
                     y: 1.0,
                     expected_bounds: Some(bounds)

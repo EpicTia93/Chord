@@ -291,3 +291,236 @@ impl Drop for PackageSupervisor {
         self.stop();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::HandlerChordAction;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("chord-recovery-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(root.join("js")).unwrap();
+            std::fs::write(root.join("package.json"), r#"{"name":"recovery-fixture"}"#).unwrap();
+            Self(root)
+        }
+
+        async fn supervisor(&self) -> Arc<PackageSupervisor> {
+            let executable = PathBuf::from(
+                std::env::var_os("CHORD_PACKAGE_TEST_HOST")
+                    .expect("set CHORD_PACKAGE_TEST_HOST to the freshly built chord executable"),
+            );
+            PackageSupervisor::spawn(
+                &executable,
+                "recovery-fixture".into(),
+                WorkerConfig {
+                    root: self.0.clone(),
+                    cwd: self.0.clone(),
+                },
+                None,
+                Duration::from_millis(500),
+            )
+            .await
+            .unwrap()
+        }
+
+        async fn register(&self, supervisor: &PackageSupervisor, label: &str) -> String {
+            let ledger = serde_json::to_string(&self.0.join("actions.json")).unwrap();
+            let marker = serde_json::to_string(&self.0.join("crashed")).unwrap();
+            let module = self.0.join("js/fixture.js");
+            std::fs::write(
+                &module,
+                format!(
+                    r#"
+export default function(label) {{
+    (globalThis.factoryOrder ??= []).push(label);
+    return async function(mode) {{
+        const ledger = Bun.file({ledger});
+        const actions = await ledger.exists() ? await ledger.json() : [];
+        actions.push(label + ":" + mode);
+        await Bun.write(ledger, JSON.stringify(actions));
+        if (mode === "abort-once" && !await Bun.file({marker}).exists()) {{
+            await Bun.write({marker}, "crashed");
+            process.abort();
+        }}
+        if (mode === "hang") await new Promise(() => {{}});
+        if (mode === "throw") throw new Error("ordinary handler exception");
+        if (mode === "order" && globalThis.factoryOrder.join(",") !== "first,second")
+            throw new Error("factory order changed during recovery");
+    }};
+}}
+"#
+                ),
+            )
+            .unwrap();
+            supervisor
+                .request(Request::Register {
+                    module: module.to_string_lossy().into_owned(),
+                    raw: serde_json::json!({"name":"fixture"}),
+                    pathslug: "fixture.toml".into(),
+                    app_id: None,
+                    args: vec![label.into()],
+                })
+                .await
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+
+        fn actions(&self) -> Vec<String> {
+            serde_json::from_slice(&std::fs::read(self.0.join("actions.json")).unwrap()).unwrap()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn invoke(id: &str, mode: &str) -> Request {
+        Request::Invoke {
+            action: HandlerChordAction {
+                handler_id: id.into(),
+                event_args: vec![mode.into()],
+                input: "fixture".into(),
+                sequence_id: None,
+                assign_to: None,
+                keyboard_event: None,
+            },
+            app_id: None,
+            count: 1,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a freshly built chord executable; see tests/package-isolation/README.md"]
+    async fn supervisor_restores_handlers_without_replaying_actions_or_blocking_other_packages() {
+        let fixture = Fixture::new();
+        let supervisor = fixture.supervisor().await;
+        let first = fixture.register(&supervisor, "first").await;
+        let second = fixture.register(&supervisor, "second").await;
+        let stable_id = supervisor.id.clone();
+        let original_pid = supervisor.active.lock().process.child.lock().id();
+        let peer_fixture = Fixture::new();
+        let peer = peer_fixture.supervisor().await;
+        let peer_id = peer_fixture.register(&peer, "peer").await;
+        let peer_pid = peer.active.lock().process.child.lock().id();
+        let (failed, healthy) = tokio::join!(
+            supervisor.request(invoke(&first, "abort-once")),
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                peer.request(invoke(&peer_id, "healthy"))
+            ),
+        );
+        assert!(
+            failed
+                .unwrap_err()
+                .to_string()
+                .contains("exited or disconnected")
+        );
+        healthy
+            .expect("another package's crash blocked a healthy worker")
+            .unwrap();
+        // No invocation triggers this restart: verify idle background recovery.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if supervisor.active.lock().process.child.lock().id() != original_pid {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the failed worker was not replaced automatically");
+        supervisor.request(invoke(&second, "order")).await.unwrap();
+        supervisor
+            .request(invoke(&first, "after-recovery"))
+            .await
+            .unwrap();
+        assert_eq!(supervisor.id, stable_id);
+        assert_eq!(
+            fixture.actions(),
+            ["first:abort-once", "second:order", "first:after-recovery"]
+        );
+        assert_eq!(peer.active.lock().process.child.lock().id(), peer_pid);
+
+        let recovered_pid = supervisor.active.lock().process.child.lock().id();
+        assert!(
+            supervisor
+                .request(invoke(&first, "throw"))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("ordinary handler exception")
+        );
+        assert_eq!(
+            supervisor.active.lock().process.child.lock().id(),
+            recovered_pid
+        );
+        supervisor
+            .request(Request::RetainHandlers(vec![first.clone()]))
+            .await
+            .unwrap();
+        supervisor.abort();
+        supervisor
+            .request(invoke(&first, "after-abort"))
+            .await
+            .unwrap();
+        assert!(
+            supervisor
+                .request(invoke(&second, "removed"))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("no longer registered")
+        );
+        let final_pid = supervisor.active.lock().process.child.lock().id();
+        supervisor.stop();
+        assert!(
+            supervisor
+                .request(invoke(&first, "unloaded"))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("was unloaded")
+        );
+        tokio::time::sleep(HEALTH_INTERVAL + Duration::from_millis(100)).await;
+        assert_eq!(
+            supervisor.active.lock().process.child.lock().id(),
+            final_pid
+        );
+        assert!(
+            supervisor
+                .active
+                .lock()
+                .process
+                .child
+                .lock()
+                .try_wait()
+                .unwrap()
+                .is_some()
+        );
+        peer.stop();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a freshly built chord executable; see tests/package-isolation/README.md"]
+    async fn supervisor_recovers_from_action_timeouts_and_keeps_queued_actions_once_only() {
+        let fixture = Fixture::new();
+        let supervisor = fixture.supervisor().await;
+        let id = fixture.register(&supervisor, "first").await;
+        let (hung, queued) = tokio::join!(
+            supervisor.request(invoke(&id, "hang")),
+            supervisor.request(invoke(&id, "queued")),
+        );
+        assert!(hung.unwrap_err().to_string().contains("timed out"));
+        queued.unwrap();
+        assert_eq!(fixture.actions(), ["first:hang", "first:queued"]);
+        supervisor.stop();
+    }
+}

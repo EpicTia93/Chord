@@ -142,12 +142,18 @@ impl PackageWorker {
         });
         tokio::task::spawn_blocking(move || {
             let mut pressed = HashSet::new();
+            let mut mouse = crate::native_input::MouseSession::default();
             while let Ok(request) = read_frame::<HostRequest>(&mut host) {
                 let result = handle
                     .as_ref()
                     .context("Chord host APIs are unavailable")
                     .and_then(|handle| {
-                        super::chord_module::handle_host_request(handle, request, &mut pressed)
+                        super::chord_module::handle_host_request(
+                            handle,
+                            request,
+                            &mut pressed,
+                            &mut mouse,
+                        )
                     });
                 let response = Response {
                     result: result.map_err(|error| format!("{error:#}")),
@@ -157,12 +163,14 @@ impl PackageWorker {
                 }
             }
             // A package dying after press() must not leave a simulated modifier held.
+            mouse.release();
             if let Some(handle) = handle {
                 for key in pressed {
                     let _ = super::chord_module::handle_host_request(
                         &handle,
                         HostRequest::Release(key),
                         &mut HashSet::new(),
+                        &mut mouse,
                     );
                 }
             }

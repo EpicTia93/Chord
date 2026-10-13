@@ -1,6 +1,8 @@
 #![allow(unused)]
 mod chord;
 pub use chord::*;
+mod chord_command;
+pub use chord_command::*;
 mod chord_hint;
 pub use chord_hint::*;
 mod chord_trigger;

@@ -1,9 +1,9 @@
 import type { Chord, ChordHint, ChordReference } from '@chord/dev.improve.chord.lib.typeshare';
 import { cn } from '@chord/com.npmjs.utils-cn';
 import { Kbd } from '@chord/dev.improve.chord.components.ui.kbd';
-import { StateQueries, useChordInputState, useChordPackageManagerState, useChordPanelState, useFrontmostState, useKeyboardState } from '@chord/dev.improve.chord.lib.state';
+import { StateQueries, useChordExecutionState, useChordInputState, useChordPackageManagerState, useChordPanelState, useFrontmostState, useKeyboardState } from '@chord/dev.improve.chord.lib.state';
 import { emit, listen } from '@tauri-apps/api/event';
-import getPrettyKey from 'pretty-key';
+import { getRepeatPrefixTokens, normalizeChordTokens, normalizeToken } from '#chord-tokens';
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 const LETTER_TOKENS = Array.from({ length: 26 }, (_, index) =>
@@ -15,19 +15,6 @@ const SINGLE_LETTER_TOKEN_REGEX = /^[A-Z]$/;
 
 function clamp(value: number, min: number, max: number) {
 	return Math.min(Math.max(value, min), max);
-}
-
-function normalizePrettyKey(token: string) {
-	if (token === '_') {
-		return '-';
-	}
-
-	return token;
-}
-
-function normalizeToken(token: string) {
-	const pretty = normalizePrettyKey(getPrettyKey(token));
-	return pretty.length === 1 ? pretty.toUpperCase() : pretty;
 }
 
 function sortTokens(tokens: Iterable<string>) {
@@ -94,9 +81,9 @@ function ChordKeyRow({
 
 export function ChordsPage() {
 	return (
-		<StateQueries queries={[useChordInputState(), useChordPanelState(), useKeyboardState(), useFrontmostState(), useChordPackageManagerState()]} quiet>
-			{(chordInputData, chordPanelData, keyboardData, frontmostData, chordPackageManagerData) => (
-				<ChordsPageContent chordInputData={chordInputData} chordPanelData={chordPanelData} keyboardData={keyboardData} frontmostData={frontmostData} chordPackageManagerData={chordPackageManagerData} />
+		<StateQueries queries={[useChordInputState(), useChordPanelState(), useKeyboardState(), useFrontmostState(), useChordPackageManagerState(), useChordExecutionState()]} quiet>
+			{(chordInputData, chordPanelData, keyboardData, frontmostData, chordPackageManagerData, chordExecutionData) => (
+				<ChordsPageContent chordInputData={chordInputData} chordPanelData={chordPanelData} keyboardData={keyboardData} frontmostData={frontmostData} chordPackageManagerData={chordPackageManagerData} chordExecutionData={chordExecutionData} />
 			)}
 		</StateQueries>
 	);
@@ -108,18 +95,21 @@ function ChordsPageContent({
 	keyboardData,
 	frontmostData,
 	chordPackageManagerData,
+	chordExecutionData,
 }: {
 	chordInputData: NonNullable<ReturnType<typeof useChordInputState>['data']>
 	chordPanelData: NonNullable<ReturnType<typeof useChordPanelState>['data']>
 	keyboardData: NonNullable<ReturnType<typeof useKeyboardState>['data']>
 	frontmostData: NonNullable<ReturnType<typeof useFrontmostState>['data']>
 	chordPackageManagerData: NonNullable<ReturnType<typeof useChordPackageManagerState>['data']>
+	chordExecutionData: NonNullable<ReturnType<typeof useChordExecutionState>['data']>
 }) {
 	const chordInputState = chordInputData;
 	const chordPanelState = chordPanelData;
 	const keyboardState = keyboardData;
 	const { frontmostAppBundleId } = frontmostData;
 	const { packages } = chordPackageManagerData;
+	const { loops, metaCommands } = chordExecutionData;
 
 	const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
 	const [surfaceVersion, setSurfaceVersion] = useState(0);
@@ -220,7 +210,7 @@ function ChordsPageContent({
 	}
 
 	const activeChords: Chord[] = [...activeAppChords, ...globalChords.map(c => c.chord)];
-	const hintSequences = Object.values(hintsByRawPattern).flatMap(hint =>
+	const baseHintSequences = Object.values(hintsByRawPattern).flatMap(hint =>
 		'keys' in hint.pattern
 			? [{ tokens: hint.pattern.keys.map(normalizeToken), description: hint.description }]
 			: 'range' in hint.pattern
@@ -228,7 +218,7 @@ function ChordsPageContent({
 				: [],
 	);
 
-	const rangeHints = Object.values(hintsByRawPattern).flatMap(hint =>
+	const baseRangeHints = Object.values(hintsByRawPattern).flatMap(hint =>
 		'range' in hint.pattern
 			? [
 					{
@@ -240,8 +230,8 @@ function ChordsPageContent({
 			: [],
 	);
 
-	const normalizedBufferTokens = chordInputState.input.map(normalizeToken);
-	const normalizedActiveChordTokens = chordInputState.selectedInputEvent?.input.map(normalizeToken) ?? [];
+	const normalizedBufferTokens = normalizeChordTokens(chordInputState.input);
+	const normalizedActiveChordTokens = normalizeChordTokens(chordInputState.selectedInputEvent?.input ?? []);
 
 	const shouldHighlightActiveChord
 		= keyboardState.isShiftPressed
@@ -251,6 +241,20 @@ function ChordsPageContent({
 		? normalizedActiveChordTokens
 		: normalizedBufferTokens;
 	const currentPrefixLength = selectedTokens.length;
+	const repeatPrefixTokens = getRepeatPrefixTokens(selectedTokens);
+	const builtinHints = [
+		...metaCommands,
+		...loops.map(loop => ({ sequence: `0h${loop.id}`, name: `Halt loop ${loop.id}: ${loop.input}` })),
+	].map(hint => ({ tokens: [...hint.sequence].map(normalizeToken), description: hint.name }));
+	const hintSequences = [
+		...baseHintSequences.map(hint => ({ ...hint, tokens: [...repeatPrefixTokens, ...hint.tokens] })),
+		...(repeatPrefixTokens.length === 0 ? builtinHints : []),
+		...Array.from({ length: repeatPrefixTokens.length ? 10 : 9 }, (_, index) => {
+			const digit = String(index + (repeatPrefixTokens.length ? 0 : 1));
+			return { tokens: [...repeatPrefixTokens, digit], description: repeatPrefixTokens.length === 0 && digit === '1' ? 'Loop chord' : 'Repeat count' };
+		}),
+	];
+	const rangeHints = baseRangeHints.map(hint => ({ ...hint, prefix: [...repeatPrefixTokens, ...hint.prefix] }));
 
 	const maxVisibleRows = 20;
 	const availableHeight = Math.max(viewportHeight - 96, 240);
@@ -271,7 +275,7 @@ function ChordsPageContent({
 		},
 		(_, columnIndex) => {
 			const prefixTokens = selectedTokens.slice(0, columnIndex);
-			const getChordKeys = (chord: Chord) => 'keys' in chord.trigger ? chord.trigger.keys.map(normalizeToken) : [];
+			const getChordKeys = (chord: Chord) => 'keys' in chord.trigger ? [...repeatPrefixTokens, ...normalizeChordTokens(chord.trigger.keys)] : [];
 
 			const matchingChords = activeChords.filter(chord =>
 				prefixTokens.every((token, tokenIndex) => getChordKeys(chord)[tokenIndex] === token),
@@ -359,6 +363,18 @@ function ChordsPageContent({
 						opacity: chordPanelState.isVisible ? 1 : 0,
 					}}
 				>
+						{repeatPrefixTokens.length > 0 && (
+							<div className="mb-3 text-xs text-foreground/70">
+								{Number(repeatPrefixTokens.join('')) === 1 ? 'Loop chord' : `Repeat ${repeatPrefixTokens.join('')} times`}
+							</div>
+						)}
+						{loops.length > 0 && (
+							<div className="mb-3 flex max-h-24 flex-col gap-1 overflow-y-auto text-xs text-foreground/80">
+								{loops.map(loop => (
+									<div key={loop.id}>Loop {loop.id}: <code>{loop.input}</code> · Halt: <code>0h{loop.id}</code></div>
+								))}
+							</div>
+						)}
 					<div className="relative flex items-start">
 						<div className="flex items-start gap-6">
 							{keyColumns.map(column => (

@@ -46,8 +46,8 @@ impl HandlerChordActionTaskRunner {
         })
     }
 
-    pub async fn end(&self, task_run: HandlerChordActionTaskRun) -> Result<()> {
-        task_run.join_handle.await?
+    pub async fn end(&self, task_run: &mut HandlerChordActionTaskRun) -> Result<()> {
+        (&mut task_run.join_handle).await?
     }
 
     #[allow(dead_code)]

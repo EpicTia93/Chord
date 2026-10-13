@@ -199,6 +199,7 @@ pub(crate) fn handle_host_request(
     handle: &tauri::AppHandle,
     request: HostRequest,
     pressed: &mut HashSet<String>,
+    mouse: &mut crate::native_input::MouseSession,
 ) -> anyhow::Result<serde_json::Value> {
     use serde_json::Value as Json;
     // Workers can now call these APIs concurrently; allocation and storage must stay atomic.
@@ -234,6 +235,10 @@ pub(crate) fn handle_host_request(
         return Ok(Json::Null);
     }
     match request {
+        HostRequest::Mouse(options) => {
+            mouse.apply(&options)?;
+            Ok(Json::Null)
+        }
         HostRequest::Press(key) | HostRequest::Tap(key) | HostRequest::Release(key) => {
             anyhow::bail!("unhandled input operation: {key}")
         }
@@ -376,10 +381,57 @@ fn get_app_windows<'js>(ctx: Ctx<'js>, bundle_id: String) -> rbun::Result<Value<
 async fn click<'js>(ctx: Ctx<'js>, options: Value<'js>) -> rbun::Result<()> {
     let options: crate::native_input::ClickOptions =
         rbun::serde::from_value(options).or_throw_msg(&ctx, "invalid click options")?;
-    tauri::async_runtime::spawn_blocking(move || crate::native_input::click(&options))
-        .await
-        .or_throw_msg(&ctx, "click worker failed")?
-        .or_throw_msg(&ctx, "window-targeted click failed")
+    let remote = ctx
+        .userdata::<AppUserData>()
+        .and_then(|data| data.package.as_ref().map(|package| package.host.clone()));
+    tauri::async_runtime::spawn_blocking(move || {
+        if options.move_cursor {
+            let options = crate::native_input::MouseOptions {
+                action: crate::native_input::MouseAction::Click,
+                window_id: Some(options.window_id),
+                x: options.x,
+                y: options.y,
+                expected_bounds: options.expected_bounds,
+                button: options.button,
+                click_count: options.click_count,
+                press_duration_ms: options.press_duration_ms,
+            };
+            if let Some(remote) = remote {
+                remote.call(HostRequest::Mouse(options)).map(|_| ())
+            } else {
+                crate::native_input::standalone_mouse(&options)
+            }
+        } else {
+            crate::native_input::click(&options)
+        }
+    })
+    .await
+    .or_throw_msg(&ctx, "click worker failed")?
+    .or_throw_msg(&ctx, "window-targeted click failed")
+}
+
+fn get_screen_bounds<'js>(ctx: Ctx<'js>) -> rbun::Result<Value<'js>> {
+    let bounds = crate::native_input::get_screen_bounds()
+        .or_throw_msg(&ctx, "failed to read screen bounds")?;
+    rbun::serde::to_value(ctx.clone(), bounds).or_throw_msg(&ctx, "failed to convert screen bounds")
+}
+
+async fn mouse<'js>(ctx: Ctx<'js>, options: Value<'js>) -> rbun::Result<()> {
+    let options: crate::native_input::MouseOptions =
+        rbun::serde::from_value(options).or_throw_msg(&ctx, "invalid mouse options")?;
+    let remote = ctx
+        .userdata::<AppUserData>()
+        .and_then(|data| data.package.as_ref().map(|package| package.host.clone()));
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(remote) = remote {
+            remote.call(HostRequest::Mouse(options)).map(|_| ())
+        } else {
+            crate::native_input::standalone_mouse(&options)
+        }
+    })
+    .await
+    .or_throw_msg(&ctx, "mouse worker failed")?
+    .or_throw_msg(&ctx, "mouse input failed")
 }
 
 async fn run_sudo_command<'js>(
@@ -582,6 +634,8 @@ impl ModuleDef for ChordModule {
         declare.declare("tap")?;
         declare.declare("click")?;
         declare.declare("getAppWindows")?;
+        declare.declare("getScreenBounds")?;
+        declare.declare("mouse")?;
         declare.declare("getGlobalHotkey")?;
         declare.declare("registerGlobalHotkey")?;
         declare.declare("setAppNeedsRelaunch")?;
@@ -603,6 +657,8 @@ impl ModuleDef for ChordModule {
         exports.export("tap", Func::from(tap))?;
         exports.export("click", Func::from(Async(click)))?;
         exports.export("getAppWindows", Func::from(get_app_windows))?;
+        exports.export("getScreenBounds", Func::from(get_screen_bounds))?;
+        exports.export("mouse", Func::from(Async(mouse)))?;
         exports.export("getGlobalHotkey", Func::from(get_global_hotkey))?;
         exports.export("registerGlobalHotkey", Func::from(register_global_hotkey))?;
         exports.export("setAppNeedsRelaunch", Func::from(set_app_needs_relaunch))?;

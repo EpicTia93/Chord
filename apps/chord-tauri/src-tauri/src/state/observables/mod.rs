@@ -3,6 +3,8 @@ mod app_mode;
 pub use app_mode::*;
 mod chord_input;
 pub use chord_input::*;
+mod chord_execution;
+pub use chord_execution::*;
 mod chord_package_manager;
 pub use chord_package_manager::*;
 mod chord_package_registry;

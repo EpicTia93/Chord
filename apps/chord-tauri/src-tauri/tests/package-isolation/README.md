@@ -7,8 +7,12 @@ child, whose Cocoa main loop services Swift's MainActor. The GUI does not execut
 package JavaScript or load package native add-ons.
 
 An abort, segmentation fault, process exit, disconnected IPC stream, or timeout
-disables that worker until configuration reload. Actions are never replayed. A
-reload replaces the whole VM, including native modules and transitive imports.
+terminates that worker. A stable supervisor automatically creates a fresh VM and
+restores registered handler factories in their original order, preserving the
+handler IDs used by the compiled chords. Actions are never replayed. Recovery
+resets JS/native state, timers, and sequence return values. Retries use exponential
+backoff from 250 ms up to 30 seconds; a healthy minute resets the backoff. A reload
+replaces the whole supervisor/VM, including native modules and transitive imports.
 Cyclic, excessively deep, or excessive TOML import expansions are rejected before
 compilation. GUI source reads are limited to 8 MiB per file and 32 MiB per package,
 with at most 10,000 source entries; bin/ and target/ payloads are read only by workers.
@@ -32,6 +36,15 @@ import aborts, factory exits, handler aborts, native SIGSEGV, process-group abor
 unresolved promises, lifecycle aborts, timer aborts, ordinary exceptions,
 cross-request JavaScript object identity, handler context, lifecycle unsubscribe,
 package/native path resolution, and continued execution in a healthy worker.
+
+The transport regression intentionally checks a single disposable process; the
+supervisor recovery regression additionally verifies background replacement,
+stable handler IDs, factory order, queued actions executing once, timeouts,
+ordinary exceptions, cancellation, removed handlers, and shutdown without respawn:
+
+    CHORD_PACKAGE_TEST_HOST="$PWD/apps/chord-tauri/src-tauri/target/debug/chord" \
+      cargo test --manifest-path apps/chord-tauri/src-tauri/Cargo.toml \
+      --lib supervisor_ -- --ignored --nocapture
 
 The original NodeSwift 1.5.1 missing-queue abort has a separate regression.
 Build its two deliberately unsafe fixtures against an existing NodeSwift 1.5.1

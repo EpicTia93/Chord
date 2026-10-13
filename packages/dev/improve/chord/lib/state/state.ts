@@ -2,6 +2,7 @@ import type {
 	AppPermissionsState,
 	AppSettingsState,
 	ChordInputState,
+	ChordExecutionState,
 	ChordPackageManagerState,
 	ChordPackageStoreState,
 	ChordPanelState,
@@ -19,6 +20,7 @@ export interface TauriStates {
 	keyboard: KeyboardState
 	'chord-panel': ChordPanelState
 	'chord-input': ChordInputState
+	'chord-execution': ChordExecutionState
 	settings: AppSettingsState
 	permissions: AppPermissionsState
 	'git-repos': GitReposState
@@ -29,7 +31,7 @@ export interface TauriStates {
 }
 
 const stateIds = [
-	'keyboard', 'chord-panel', 'chord-input', 'settings', 'permissions',
+	'keyboard', 'chord-panel', 'chord-input', 'chord-execution', 'settings', 'permissions',
 	'git-repos', 'frontmost', 'chord-package-manager', 'desktop-app-manager',
 	'chord-package-store',
 ] as const;
@@ -51,6 +53,7 @@ function createUseTauriState<K extends keyof TauriStates>(stateId: K) {
 export const useKeyboardState = createUseTauriState('keyboard');
 export const useChordPanelState = createUseTauriState('chord-panel');
 export const useChordInputState = createUseTauriState('chord-input');
+export const useChordExecutionState = createUseTauriState('chord-execution');
 export const useSettingsState = createUseTauriState('settings');
 export const usePermissionsState = createUseTauriState('permissions');
 export const useGitRepoStoreState = createUseTauriState('git-repos');

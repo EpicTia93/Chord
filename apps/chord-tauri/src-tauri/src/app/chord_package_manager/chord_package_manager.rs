@@ -429,6 +429,7 @@ impl ChordPackageManager {
     }
 
     async fn reload_once(&self, required_packages: &[String]) -> Result<()> {
+        self.handle.app_state().chord_mode_manager().stop_loops()?;
         let raw_chord_packages = self.registry.import_all_packages()?;
         let previous_roots = self.package_roots.read().clone();
 

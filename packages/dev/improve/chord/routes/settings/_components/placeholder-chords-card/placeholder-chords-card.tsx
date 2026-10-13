@@ -44,7 +44,7 @@ function PlaceholderChordsCardContent({
 				<CardDescription>
 					Configure letter sequences for template chords like
 					{' '}
-					<code>{`\\<Dark Mode>`}</code>
+					<code>{`dm<Dark Mode>`}</code>
 					.
 				</CardDescription>
 			</CardHeader>
