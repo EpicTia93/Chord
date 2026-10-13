@@ -33,13 +33,13 @@ Chord keys are literal except for parenthesized regex sections. For example, `hs
 
 Handlers receive the entered sequence as `this.input` (for example, `hsr12`), alongside `this.focusedAppId` and `this.event`. This also works for CLI execution.
 
-| Trigger | When it calls the handler |
-| --- | --- |
-| `@init:event` | Once when this chord starts matching, before its other event handlers. |
-| `@keydown:event` | After each keydown, using the buffer after any edit. |
-| `@keypress:event` | After the matching keydown handlers, for every key press, including Backspace and modifiers. |
-| `@keyup:event` | After each key release, using the current buffer. |
-| `@input:event` | When the chord is completed with Caps Lock, the final shifted key, Space release, or the CLI. |
+| Trigger           | When it calls the handler                                                                     |
+| ----------------- | --------------------------------------------------------------------------------------------- |
+| `@init:event`     | Once when this chord starts matching, before its other event handlers.                        |
+| `@keydown:event`  | After each keydown, using the buffer after any edit.                                          |
+| `@keypress:event` | After the matching keydown handlers, for every key press, including Backspace and modifiers.  |
+| `@keyup:event`    | After each key release, using the current buffer.                                             |
+| `@input:event`    | When the chord is completed with Caps Lock, the final shifted key, Space release, or the CLI. |
 
 All matching lifecycle chords are visited in app/global and package priority order. Ordinary input completion keeps its first-match action priority. Initializers run before the other callbacks for a buffer snapshot, and callbacks are awaited in event order, including Promise return values. A callback failure stops the remaining callbacks for that snapshot and is reported through Chord's normal handler-error path.
 
@@ -77,10 +77,10 @@ The built-in `chord` module is intentionally kept minimal.
 
 ```ts
 export class Applescript {
-	constructor(source: string);
-	constructor(fn: (...args: unknown[]) => unknown, ...args: unknown[]);
-	compile(): void;
-	execute(): unknown;
+  constructor(source: string);
+  constructor(fn: (...args: unknown[]) => unknown, ...args: unknown[]);
+  compile(): void;
+  execute(): unknown;
 }
 
 export function setAppNeedsRelaunch(bundleId: string, needsRelaunch: boolean): void;
@@ -97,6 +97,9 @@ export function click(options: {
   x: number;
   y: number;
   expectedBounds?: WindowBounds;
+  button?: "left" | "right" | "middle";
+  clickCount?: 1 | 2;
+  pressDurationMs?: number;
 }): Promise<void>;
 ```
 
@@ -121,7 +124,9 @@ When constructed with a string it runs AppleScript source directly. When constru
 activating it. Windows retain their IDs and geometry even when another app covers them. Titles
 can be null when macOS does not expose them. Select the intended window before sending input.
 
-`click` sends a left-button down/up pair to that window. `x` and `y` are window-local macOS
+`click` sends button down/up events to that window. It defaults to one left click;
+`button` selects left, right, or middle, and `clickCount: 2` sends a double click.
+`pressDurationMs` sets the hold duration (default 80 ms, accepted range 1–5000 ms). `x` and `y` are window-local macOS
 logical screen points measured from its top-left corner; they are independent of Retina scaling.
 The helper preserves the Mac pointer and foreground app. Optional `expectedBounds` rejects a
 window that has moved or resized since coordinates were calculated. Invalid coordinates, missing
@@ -228,9 +233,9 @@ first.
 
 Every chord handler is a JavaScript module, and Chord runs it on an embedded [Bun](https://bun.sh) runtime via the [`rbun`](https://github.com/KeyChord/rbun) crate. Native Swift is exposed as a Node-API add-on built with [NodeSwift](https://github.com/kabiroberai/node-swift):
 
-`src/swift/menu/menu.swift` → `target/<triple>/menu/menu.node`
+`Sources/KeychordChordsMenuNativeMenu/menu.swift` → `target/<triple>/menu/menu.node`
 
-`@keychord/config` discovers and compiles this layout automatically. It publishes NodeSwift's dynamic `libNodeAPI.dylib` beside each `.node` file. Keeping that runtime dynamic lets Chord safely load add-ons from several packages in one process; the package does not need an npm dependency on NodeSwift at runtime.
+`@keychord/config` builds the dynamic library products in the package's root `Package.swift` and resolves normal `.node` imports in handlers. Its plugin packages each addon under `js/native/<triple>/<name>/`, with NodeSwift's dynamic `libNodeAPI.dylib` beside it. Keeping that runtime dynamic lets Chord safely load add-ons from several packages in one process; the package does not need an npm dependency on NodeSwift at runtime.
 
 > **Trust:** native code runs inside Chord with your full user permissions. Only enable packages from sources you trust.
 
@@ -240,13 +245,17 @@ Every chord handler is a JavaScript module, and Chord runs it on an embedded [Bu
 my-package/
 ├── chords/macos.toml
 ├── src/
-│   ├── js/menu.ts                 # resolves and loads the Node-API add-on
-│   └── swift/
-│       ├── _shared/**             # compiled into every add-on
-│       └── menu/
-│           ├── menu.swift         # entry point: exports #NodeModule
-│           └── helpers.swift      # optional additional Swift source
-├── js/menu.js                     # portable JavaScript build output
+│   ├── js/menu.ts                 # imports ./menu.node
+│   └── types/native.d.ts          # declares the addon's TypeScript API
+├── Package.swift                 # Swift products and dependencies
+├── Sources/KeychordChordsMenuNativeMenu/
+│   ├── menu.swift                 # entry point: exports #NodeModule
+│   └── helpers.swift
+├── js/
+│   ├── menu.js                    # generated JavaScript bundle
+│   └── native/aarch64-apple-darwin/menu/
+│       ├── menu-<hash>.node       # packaged addon
+│       └── libNodeAPI.dylib
 └── target/                        # platform-specific output — commit/publish it like js/
     └── aarch64-apple-darwin/
         └── menu/
@@ -254,14 +263,14 @@ my-package/
             └── libNodeAPI.dylib   # shared NodeSwift runtime, found through @loader_path
 ```
 
-`src/` is authored source, `chords/` is Chord configuration, `js/` holds portable JavaScript artifacts, and `target/<triple>/` holds native artifacts. Native build state lives in `node_modules/.cache/chord/native/`, covered by the usual `node_modules/` ignore. Keep `target/` tracked.
+`src/` and `Sources/` are authored source, `chords/` is Chord configuration, and `js/` holds the generated bundles and their native assets. `target/<triple>/` holds native build products. Native build state lives in `node_modules/.cache/chord/native/`, covered by the usual `node_modules/` ignore. Keep distributable `js/` and `target/` files tracked.
 
 ## Writing one
 
 Import `NodeAPI` and declare the add-on exports with `#NodeModule`. NodeSwift converts supported Swift values and thrown errors at the Node-API boundary, so no C ABI or manual pointer ownership is needed:
 
 ```swift
-// src/swift/beep/beep.swift
+// Sources/KeychordExampleNativeBeep/beep.swift
 import AppKit
 import NodeAPI
 
@@ -278,28 +287,30 @@ enum BeepError: Error {
 ])
 ```
 
-The handler resolves the add-on through `import.meta.chord`—never with a hardcoded target triple—and loads it with Bun's Node-compatible `process.dlopen`:
+The handler imports the addon normally. `config()` supplies the native-addon plugin automatically, so the handler needs no build alias or runtime path resolver:
 
 ```ts
 // src/js/beep.ts
-type BeepAddon = { beep(times: number): void };
-let addon: BeepAddon | undefined;
-
-function openAddon(): BeepAddon {
-  const module = { exports: {} as BeepAddon };
-  process.dlopen(module, import.meta.chord.resolveNative("beep"));
-  return module.exports;
-}
+import addon from "./beep.node";
 
 export default function build(times = 1) {
   return function beep() {
-    addon ??= openAddon();
     addon.beep(times);
   };
 }
 ```
 
-- `import.meta.chord.resolveNative("beep")` returns the absolute path of `target/<Chord's triple>/beep/beep.node` for the calling module's package, including when the package is vendored inside another one. `import.meta.chord.resolvePackageFile("any/relative/path")` does the same for arbitrary package files. Both are bound to the module they are read from, so a module can only resolve paths within its own package.
+Declare the imported API in `src/types/native.d.ts`:
+
+```ts
+declare module "*/beep.node" {
+  const addon: { beep(times: number): void };
+  export default addon;
+}
+```
+
+- The plugin packages each configured target triple and selects the matching platform and architecture at runtime. Static imports load the addon with the handler module; a `require("./beep.node")` inside a function keeps loading lazy. Generated native asset URLs are relative to the emitted JavaScript, including after vendoring.
+- Existing handlers may still use `import.meta.chord.resolveNative("beep")`, which resolves `target/<Chord's triple>/beep/beep.node`. `import.meta.chord.resolvePackageFile("any/relative/path")` resolves arbitrary package files. Both remain bound to the calling module's logical package.
 - Each installed package runs in its own supervised process with a persistent embedded Bun VM. Imports, handler factories, lifecycle callbacks, timers, and native add-ons all stay in that process. On macOS the worker services AppKit events and Swift's `@MainActor`; keep NodeAPI values on `@NodeActor` and pass Swift values to the main actor. Return or await native Promises so Chord waits for completion and reports errors.
 - JavaScript and Swift exceptions are reported as handler errors. A native abort, bad pointer, or `process.exit()` terminates only the package worker. Chord disables that worker until configuration reload, leaves other packages running, and never replays the failed action. Setup and health checks have a 15-second deadline; actions and lifecycle callbacks have a five-minute deadline for interactive UI.
 - Reloading configuration replaces package workers, so rebuilt JavaScript, transitive imports, and native add-ons are loaded into fresh VMs. Return-value assignments preserve JavaScript object identity inside the package's VM between events in the same matching interval.
@@ -323,13 +334,13 @@ The old `kind = "native"` declaration is rejected with a pointer to this section
 
 ## Using native handlers from other packages
 
-Vendor the dependency with `config({ vendor: ["@keychord/chords-menu"] })` and import its JavaScript normally. Vendoring copies the dependency's `target/` tree alongside its `js/` and `chords/`; the dependency's own `import.meta.chord.resolveNative("menu")` call automatically maps to `target/@keychord/chords-menu/target/<triple>/menu/menu.node`. Add-ons are consumed through their JavaScript API, not by importing their generated Swift modules.
+Vendor the dependency with `config({ vendor: ["@keychord/chords-menu"] })` and import its JavaScript normally. Its copied `js/` tree includes the packaged native addons and runtime libraries, so relative native asset URLs continue to work. Vendoring also preserves the `target/` tree for existing handlers using runtime path resolvers. Add-ons are consumed through their JavaScript API, not by importing their generated Swift modules.
 
-For compatibility with installed packages, the `chord` module still exports `resolveNativeModulePath(import.meta, relpath)` and `resolvePackageFile(import.meta, path)`. These delegate to the same per-module resolvers; new handlers should use `import.meta.chord` directly.
+For compatibility with installed packages, the `chord` module still exports `resolveNativeModulePath(import.meta, relpath)` and `resolvePackageFile(import.meta, path)`. These delegate to the same per-module resolvers. New native handlers built with `@keychord/config` can use `.node` imports directly.
 
 ## Building
 
-Packages built with `@keychord/config` compile `src/swift` automatically as part of `vp pack` (and rebuild on change in `vp pack --watch`). To build every distributable folder at once—`js/` and `target/<triple>/`—run `vpr compile` (`--triple <triple>` to cross-build, `--skip-js`/`--skip-native` for one half, `vpr -r compile` for the whole workspace). Building needs a Swift toolchain from Xcode or the Command Line Tools. Options go in `vite.config.ts`:
+Packages built with `@keychord/config` compile the package's `Package.swift` automatically as part of `vp pack` (and rebuild on change in `vp pack --watch`). To build every distributable folder at once—`js/` and `target/<triple>/`—run `vpr compile` (`--triple <triple>` to cross-build, `--skip-js`/`--skip-native` for one half, `vpr -r compile` for the whole workspace). Building needs a Swift toolchain from Xcode or the Command Line Tools. Build options go in `vite.config.ts`; Swift frameworks, compiler flags, and linker settings belong in `Package.swift`:
 
 ```ts
 import { config } from "@keychord/config";
@@ -337,24 +348,17 @@ import { config } from "@keychord/config";
 export default config({
   native: {
     triples: ["aarch64-apple-darwin", "x86_64-apple-darwin"], // default: host triple
-    targets: {
-      menu: {
-        frameworks: ["ApplicationServices"], // imports autolink; list extras here
-        swiftFlags: [],
-        linkerFlags: [],
-      },
-    },
   },
 });
 ```
 
 `@keychord/config` builds the package's root `Package.swift` directly. SwiftPM build products and staging files live in each package's `node_modules/.cache/chord/native/`, grouped by target triple and add-on; distributable files are copied to `target/`. `@keychord/config` currently supports Apple triples.
 
-Any other build system works too: Chord only cares that `target/<triple>/<path>/<name>.node` is a Node-API add-on compatible with Bun's `process.dlopen` and that its dynamic dependencies are resolvable. For the standard NodeSwift build, `libNodeAPI.dylib` sits beside the add-on and is found through `@loader_path`.
+Any other build system works too: Chord imports the package's JavaScript from disk, and its loader must resolve a Node-API addon compatible with Bun plus any dynamic dependencies. For the standard NodeSwift build, `libNodeAPI.dylib` sits beside the addon and is found through `@loader_path`.
 
 ## Testing without the app
 
-A Chord build's CLI runs a script on the same embedded Bun, with the `chord` module available (`import.meta.chord.resolveNative` anchors on the nearest `package.json`):
+A Chord build's CLI runs a script on the same embedded Bun, with the `chord` module available. Test scripts should import the generated handler from `js/` so its native imports have been processed by the plugin:
 
 ```sh
 chord bun scripts/run.ts by-letters f     # from the chords-menu checkout
@@ -362,7 +366,7 @@ chord bun scripts/run.ts by-letters f     # from the chords-menu checkout
 
 ## Troubleshooting
 
-- `process.dlopen` failures name the missing file or Node-API registration problem; check that the add-on and `libNodeAPI.dylib` under `target/<your triple>/` were built and committed and that the `#NodeModule` export names match the TypeScript binding.
+- Native loading failures name the missing file or Node-API registration problem; run `vp pack` and check that the packaged addon and `libNodeAPI.dylib` under `js/native/<your triple>/` are included and that the `#NodeModule` export names match the TypeScript binding.
 - Node-API add-ons run in Chord's embedded Bun runtime; check that the add-on targets Bun's supported Node-API surface.
 - Accessibility calls inherit Chord's Accessibility permission—grant it to Chord.
 - A native crash disables that package worker until configuration reload. Run the handler from the CLI while developing to inspect its diagnostics.

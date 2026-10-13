@@ -1,5 +1,5 @@
 //! Package code only executes in these supervised child processes, never in the GUI.
-//! A failed worker stays disabled until configuration reload; actions are never replayed.
+//! Supervisors replace failed workers and restore registrations; actions are never replayed.
 
 use super::protocol::*;
 use crate::app::AppHandleExt;
@@ -19,12 +19,15 @@ const ACTION_TIMEOUT: Duration = Duration::from_secs(300);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 const QUEUE_CAPACITY: usize = 64;
 
+mod supervisor;
+use supervisor::PackageSupervisor;
+
 #[cfg(all(test, target_os = "macos"))]
 #[path = "benchmarks.rs"]
 mod benchmarks;
 
-fn workers() -> &'static Mutex<HashMap<String, Arc<PackageWorker>>> {
-    static WORKERS: OnceLock<Mutex<HashMap<String, Arc<PackageWorker>>>> = OnceLock::new();
+fn workers() -> &'static Mutex<HashMap<String, Arc<PackageSupervisor>>> {
+    static WORKERS: OnceLock<Mutex<HashMap<String, Arc<PackageSupervisor>>>> = OnceLock::new();
     WORKERS.get_or_init(Mutex::default)
 }
 
@@ -204,7 +207,7 @@ impl PackageWorker {
                             ),
                             Ok(Ok(_)) => unreachable!(),
                         };
-                        log::error!("{reason}; package disabled until configuration reload");
+                        log::error!("{reason}; worker terminated");
                         *failure.lock() = Some(reason.clone());
                         process.stop();
                         if let Some(work) = work {
@@ -226,7 +229,7 @@ impl PackageWorker {
 
     pub(crate) async fn request(&self, request: Request) -> Result<serde_json::Value> {
         if let Some(failure) = self.failure.lock().clone() {
-            anyhow::bail!("{failure}; reload configuration to restart this package");
+            anyhow::bail!("{failure}");
         }
         let (reply, result) = oneshot::channel();
         self.tx.try_send(Work { request, reply }).map_err(|_| {
@@ -257,7 +260,7 @@ pub async fn reset_package(handle: AppHandle, name: String, root: PathBuf) -> Re
         .filter(|path| path.is_dir())
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| root.clone());
-    let worker = PackageWorker::spawn(
+    let worker = PackageSupervisor::spawn(
         &std::env::current_exe()?,
         name.clone(),
         WorkerConfig { root, cwd },
@@ -287,14 +290,14 @@ pub async fn register(handle: AppHandle, module: String, request: Request) -> Re
     Ok(format!("{}:{id}", worker.id))
 }
 
-fn worker_for_handler(id: &str) -> Result<(Arc<PackageWorker>, String)> {
+fn worker_for_handler(id: &str) -> Result<(Arc<PackageSupervisor>, String)> {
     let (worker_id, handler_id) = id.split_once(':').context("invalid package handler ID")?;
     let worker = workers()
         .lock()
         .values()
         .find(|worker| worker.id == worker_id)
         .cloned()
-        .context("package worker was replaced; reload configuration")?;
+        .context("package handler belongs to an unloaded configuration")?;
     Ok((worker, handler_id.to_string()))
 }
 
@@ -317,7 +320,7 @@ pub async fn invoke(
 
 pub fn abort(handler_id: &str) {
     if let Ok((worker, _)) = worker_for_handler(handler_id) {
-        worker.stop();
+        worker.abort();
     }
 }
 

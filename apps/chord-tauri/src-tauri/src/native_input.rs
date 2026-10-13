@@ -39,11 +39,41 @@ pub struct ClickOptions {
     pub y: f64,
     /// If supplied, reject a window that moved or resized since the caller resolved coordinates.
     pub expected_bounds: Option<WindowBounds>,
+    #[serde(default)]
+    pub button: MouseButton,
+    #[serde(default = "default_click_count")]
+    pub click_count: u8,
+    #[serde(default = "default_press_duration")]
+    pub press_duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MouseButton {
+    #[default]
+    Left,
+    Right,
+    Middle,
+}
+
+fn default_click_count() -> u8 {
+    1
+}
+fn default_press_duration() -> u64 {
+    80
 }
 
 impl ClickOptions {
     fn validate(&self) -> Result<()> {
         ensure!(self.window_id != 0, "windowId must be a nonzero window ID");
+        ensure!(
+            (1..=2).contains(&self.click_count),
+            "clickCount must be 1 or 2"
+        );
+        ensure!(
+            (1..=5_000).contains(&self.press_duration_ms),
+            "pressDurationMs must be between 1 and 5000"
+        );
         ensure!(
             self.x.is_finite() && self.y.is_finite() && self.x >= 0.0 && self.y >= 0.0,
             "click coordinates must be finite nonnegative window-local points"
@@ -83,7 +113,7 @@ pub fn get_app_windows(bundle_id: &str) -> Result<Vec<NativeWindow>> {
     anyhow::bail!("window-targeted mouse input is only supported on macOS");
 }
 
-/// Send a left-button down/up pair to one window. Run off the UI/JS thread (holds for 80 ms).
+/// Send one or two button down/up pairs to one window, off the UI/JS thread.
 pub fn click(options: &ClickOptions) -> Result<()> {
     options.validate()?;
     #[cfg(target_os = "macos")]
@@ -245,18 +275,22 @@ mod macos {
 
     fn mouse_event(
         window: &NativeWindow,
-        x: f64,
-        y: f64,
+        options: &ClickOptions,
         down: bool,
+        click_count: u8,
         background: bool,
         setter: SetWindowLocation,
     ) -> Result<CFRetained<CGEvent>> {
+        let (x, y) = (options.x, options.y);
         let local = CGPoint::new(x, y);
         let global = CGPoint::new(window.bounds.x + x, window.bounds.y + y);
-        let event_type = if down {
-            NSEventType::LeftMouseDown
-        } else {
-            NSEventType::LeftMouseUp
+        let (event_type, button_number) = match (options.button, down) {
+            (MouseButton::Left, true) => (NSEventType::LeftMouseDown, 0),
+            (MouseButton::Left, false) => (NSEventType::LeftMouseUp, 0),
+            (MouseButton::Right, true) => (NSEventType::RightMouseDown, 1),
+            (MouseButton::Right, false) => (NSEventType::RightMouseUp, 1),
+            (MouseButton::Middle, true) => (NSEventType::OtherMouseDown, 2),
+            (MouseButton::Middle, false) => (NSEventType::OtherMouseUp, 2),
         };
         let flags = if background {
             NSEventModifierFlags::Command
@@ -265,7 +299,7 @@ mod macos {
         };
         let ns_event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
             event_type, NSPoint::new(x, y), flags, NSProcessInfo::processInfo().systemUptime(),
-            window.window_id as isize, None, 1, 1, if down { 1.0 } else { 0.0 },
+            window.window_id as isize, None, 1, click_count.into(), if down { 1.0 } else { 0.0 },
         ).context("could not create a window-targeted mouse event")?;
         let source = ns_event
             .CGEvent()
@@ -273,7 +307,16 @@ mod macos {
         let event = CGEvent::new_copy(Some(&source))
             .context("could not copy the window-targeted mouse event")?;
         CGEvent::set_location(Some(&event), global);
-        CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventButtonNumber, 0);
+        CGEvent::set_integer_value_field(
+            Some(&event),
+            CGEventField::MouseEventButtonNumber,
+            button_number,
+        );
+        CGEvent::set_integer_value_field(
+            Some(&event),
+            CGEventField::MouseEventClickState,
+            click_count.into(),
+        );
         // Subtype 3 and Command on background events are the verified non-activating recipe.
         CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventSubtype, 3);
         CGEvent::set_integer_value_field(
@@ -304,14 +347,45 @@ mod macos {
                 .context("target window is no longer on-screen")?;
             options.validate_window(&window)?;
             let background = !is_frontmost(window.process_id)?;
-            // Construct both events before posting either so construction failure cannot leave a button held.
-            let down = mouse_event(&window, options.x, options.y, true, background, setter)?;
-            let up = mouse_event(&window, options.x, options.y, false, background, setter)?;
-            CGEvent::post_to_pid(window.process_id, Some(&down));
-            std::thread::sleep(Duration::from_millis(80));
-            CGEvent::post_to_pid(window.process_id, Some(&up));
+            // Construct every release before posting input so failures cannot leave a button held.
+            let events = (1..=options.click_count)
+                .map(|count| {
+                    Ok((
+                        mouse_event(&window, options, true, count, background, setter)?,
+                        mouse_event(&window, options, false, count, background, setter)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            for (index, (down, up)) in events.iter().enumerate() {
+                if index > 0 {
+                    let current = windows()?
+                        .into_iter()
+                        .find(|w| w.window_id == options.window_id)
+                        .context("target window is no longer on-screen")?;
+                    options.validate_window(&current)?;
+                    ensure!(
+                        current.bounds == window.bounds,
+                        "target window moved or resized"
+                    );
+                }
+                post_mouse_event(window.process_id, down);
+                std::thread::sleep(Duration::from_millis(options.press_duration_ms));
+                post_mouse_event(window.process_id, up);
+                if index + 1 < events.len() {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
             Ok(())
         })
+    }
+
+    fn post_mouse_event(pid: i32, event: &CGEvent) {
+        // Releases are constructed before posting, but timestamps must reflect the actual hold.
+        CGEvent::set_timestamp(
+            Some(event),
+            (NSProcessInfo::processInfo().systemUptime() * 1_000_000_000.0) as u64,
+        );
+        CGEvent::post_to_pid(pid, Some(event));
     }
 
     #[cfg(test)]
@@ -339,41 +413,72 @@ mod macos {
                 title: None,
             };
             let setter = window_location_setter().unwrap();
-            for background in [false, true] {
-                for down in [false, true] {
-                    let event =
-                        mouse_event(&window, 30.5, 40.25, down, background, setter).unwrap();
-                    let decoded = NSEvent::eventWithCGEvent(&event).unwrap();
-                    assert_eq!(decoded.windowNumber(), 123);
-                    assert_eq!(unsafe { getter(&*event) }, CGPoint::new(30.5, 40.25));
-                    assert_eq!(
-                        CGEvent::location(Some(&event)),
-                        CGPoint::new(-469.5, 240.25)
-                    );
-                    assert_eq!(
-                        CGEvent::integer_value_field(Some(&event), CGEventField::MouseEventSubtype),
-                        3
-                    );
-                    for field in [
-                        CGEventField::MouseEventWindowUnderMousePointer,
-                        CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent,
-                    ] {
-                        assert_eq!(CGEvent::integer_value_field(Some(&event), field), 123);
-                    }
-                    assert_eq!(
-                        decoded
-                            .modifierFlags()
-                            .contains(NSEventModifierFlags::Command),
-                        background
-                    );
-                    assert_eq!(
-                        decoded.r#type(),
-                        if down {
-                            NSEventType::LeftMouseDown
-                        } else {
-                            NSEventType::LeftMouseUp
+            for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+                for count in [1, 2] {
+                    for background in [false, true] {
+                        for down in [false, true] {
+                            let options = ClickOptions {
+                                window_id: 123,
+                                x: 30.5,
+                                y: 40.25,
+                                expected_bounds: None,
+                                button,
+                                click_count: count,
+                                press_duration_ms: 80,
+                            };
+                            let event =
+                                mouse_event(&window, &options, down, count, background, setter)
+                                    .unwrap();
+                            let decoded = NSEvent::eventWithCGEvent(&event).unwrap();
+                            assert_eq!(decoded.windowNumber(), 123);
+                            assert_eq!(unsafe { getter(&*event) }, CGPoint::new(30.5, 40.25));
+                            assert_eq!(
+                                CGEvent::location(Some(&event)),
+                                CGPoint::new(-469.5, 240.25)
+                            );
+                            assert_eq!(
+                                CGEvent::integer_value_field(
+                                    Some(&event),
+                                    CGEventField::MouseEventSubtype
+                                ),
+                                3
+                            );
+                            for field in [CGEventField::MouseEventWindowUnderMousePointer, CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent] {
+                                assert_eq!(CGEvent::integer_value_field(Some(&event), field), 123);
+                            }
+                            assert_eq!(
+                                decoded
+                                    .modifierFlags()
+                                    .contains(NSEventModifierFlags::Command),
+                                background
+                            );
+                            let (event_type, number) = match (button, down) {
+                                (MouseButton::Left, true) => (NSEventType::LeftMouseDown, 0),
+                                (MouseButton::Left, false) => (NSEventType::LeftMouseUp, 0),
+                                (MouseButton::Right, true) => (NSEventType::RightMouseDown, 1),
+                                (MouseButton::Right, false) => (NSEventType::RightMouseUp, 1),
+                                (MouseButton::Middle, true) => (NSEventType::OtherMouseDown, 2),
+                                (MouseButton::Middle, false) => (NSEventType::OtherMouseUp, 2),
+                            };
+                            assert_eq!(decoded.r#type(), event_type);
+                            assert_eq!(decoded.buttonNumber(), number);
+                            assert_eq!(decoded.clickCount(), isize::from(count));
+                            assert_eq!(
+                                CGEvent::integer_value_field(
+                                    Some(&event),
+                                    CGEventField::MouseEventButtonNumber
+                                ),
+                                number as i64
+                            );
+                            assert_eq!(
+                                CGEvent::integer_value_field(
+                                    Some(&event),
+                                    CGEventField::MouseEventClickState
+                                ),
+                                i64::from(count)
+                            );
                         }
-                    );
+                    }
                 }
             }
         }
@@ -399,12 +504,58 @@ mod tests {
     }
 
     #[test]
+    fn defaults_to_one_left_click_and_validates_button_count_and_hold_duration() {
+        let options: ClickOptions =
+            serde_json::from_str(r#"{"windowId":123,"x":30,"y":20}"#).unwrap();
+        assert_eq!(options.button, MouseButton::Left);
+        assert_eq!(options.click_count, 1);
+        assert_eq!(options.press_duration_ms, 80);
+        for (button, count, hold) in [
+            (MouseButton::Right, 1, 80),
+            (MouseButton::Middle, 1, 80),
+            (MouseButton::Left, 2, 80),
+            (MouseButton::Left, 1, 500),
+        ] {
+            assert!(
+                ClickOptions {
+                    button,
+                    click_count: count,
+                    press_duration_ms: hold,
+                    ..options.clone()
+                }
+                .validate_window(&window())
+                .is_ok()
+            );
+        }
+        for (count, hold) in [(0, 80), (3, 80), (1, 0), (1, 5001)] {
+            assert!(
+                ClickOptions {
+                    click_count: count,
+                    press_duration_ms: hold,
+                    ..options.clone()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_str::<ClickOptions>(
+                r#"{"windowId":123,"x":30,"y":20,"button":"unknown"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn validates_coordinates_before_any_native_input() {
         let window = window();
         for (x, y) in [(0.0, 0.0), (299.5, 599.5)] {
             assert!(
                 ClickOptions {
                     window_id: 123,
+                    button: MouseButton::Left,
+                    click_count: 1,
+                    press_duration_ms: 80,
                     x,
                     y,
                     expected_bounds: Some(window.bounds)
@@ -423,6 +574,9 @@ mod tests {
             assert!(
                 ClickOptions {
                     window_id: 123,
+                    button: MouseButton::Left,
+                    click_count: 1,
+                    press_duration_ms: 80,
                     x,
                     y,
                     expected_bounds: None
@@ -434,6 +588,9 @@ mod tests {
         assert!(
             click(&ClickOptions {
                 window_id: 0,
+                button: MouseButton::Left,
+                click_count: 1,
+                press_duration_ms: 80,
                 x: 0.0,
                 y: 0.0,
                 expected_bounds: None
@@ -458,6 +615,9 @@ mod tests {
             assert!(
                 ClickOptions {
                     window_id: 123,
+                    button: MouseButton::Left,
+                    click_count: 1,
+                    press_duration_ms: 80,
                     x: 1.0,
                     y: 1.0,
                     expected_bounds: Some(bounds)

@@ -23,4 +23,7 @@ await assert.rejects(
   }),
   /expectedBounds/,
 );
+await assert.rejects(click({ windowId: 123, x: 0, y: 0, clickCount: 0 }), /clickCount/);
+await assert.rejects(click({ windowId: 123, x: 0, y: 0, pressDurationMs: 0 }), /pressDurationMs/);
+await assert.rejects(click({ windowId: 123, x: 0, y: 0, button: "unknown" }));
 console.log("native-input-bridge-ok (no input posted)");
