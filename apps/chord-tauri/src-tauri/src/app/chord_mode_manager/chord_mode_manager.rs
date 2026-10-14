@@ -59,6 +59,10 @@ impl ChordModeManager {
         self.input_manager.stop_loops()
     }
 
+    pub fn configure_meta_commands(&self, hints: Vec<crate::state::MetaChordHint>, halt_loop_template: String) -> Result<()> {
+        self.input_manager.configure_meta_commands(hints, halt_loop_template)
+    }
+
     pub fn ensure_active(&self) -> Result<()> {
         log::debug!("Activating Chord Mode");
         if self.panel.ensure_visible()? {

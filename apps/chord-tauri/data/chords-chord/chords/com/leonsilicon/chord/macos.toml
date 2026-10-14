@@ -1,0 +1,16 @@
+name = "Chords"
+
+# This core file is always loaded globally and cannot be removed or disabled.
+# Other packages cannot define chords or hints in the reserved 0 namespace.
+
+[chords]
+'?"1-9"' = { name = "Repeat count" }
+
+'?/' = { name = "Global" }
+
+'?0' = { name = "Chord settings" }
+'0s' = { name = "Settings", builtin = { command = "settings" } }
+'0r' = { name = "Reload config", builtin = { command = "reload" } }
+'0q' = { name = "Quit Chord", builtin = { command = "quit" } }
+'?0h' = { name = "Halt loop by ID" }
+'0h(\d+)' = { name = "Halt loop #$1", builtin = { command = "halt-loop", argument = "$1" } }

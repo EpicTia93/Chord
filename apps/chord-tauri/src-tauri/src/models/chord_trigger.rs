@@ -10,8 +10,16 @@ pub enum ChordTrigger {
 
 impl ChordTrigger {
     pub fn matches(&self, keys: &[Key]) -> bool {
+        self.matches_in_namespace(keys, false)
+    }
+
+    pub(crate) fn matches_in_namespace(&self, keys: &[Key], core: bool) -> bool {
         // Even broad user regexes cannot claim the meta namespace.
-        if keys.first().is_some_and(|key| key.to_sequence_char() == Some('0')) {
+        if !core
+            && keys
+                .first()
+                .is_some_and(|key| key.to_sequence_char() == Some('0'))
+        {
             return false;
         }
         match self {

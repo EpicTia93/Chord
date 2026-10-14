@@ -253,10 +253,10 @@ function SettingsBrowsePageContent({
 															onClick={() => {
 																void removeRepo(slug, repo.name);
 															}}
-															disabled={removeGitRepoMutation.isPending}
+															disabled={slug.toLowerCase() === 'keychord/chords-chord' || removeGitRepoMutation.isPending}
 														>
 															<Trash2 />
-															Uninstall
+															{slug.toLowerCase() === 'keychord/chords-chord' ? 'Required by Chord' : 'Uninstall'}
 														</Button>
 													)
 												: (

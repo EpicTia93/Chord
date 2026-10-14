@@ -1,4 +1,5 @@
-use super::{ChordKeyboardEvent, SimulatedShortcut};
+use super::{ChordKeyboardEvent, ChordTrigger, Key, MetaChordCommand, SimulatedShortcut};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use typeshare::typeshare;
 
@@ -11,6 +12,7 @@ pub enum ChordAction {
     Shortcut(ShortcutChordAction),
     Shell(ShellChordAction),
     Emit(EmitChordAction),
+    Builtin(BuiltinChordAction),
 }
 
 #[typeshare]
@@ -28,8 +30,63 @@ impl ChordAction {
     pub fn trigger(&self) -> ChordEventTrigger {
         match self {
             Self::Emit(action) => action.trigger,
-            Self::Shortcut(_) | Self::Shell(_) => ChordEventTrigger::Input,
+            Self::Shortcut(_) | Self::Shell(_) | Self::Builtin(_) => ChordEventTrigger::Input,
         }
+    }
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BuiltinChordKind {
+    Settings,
+    Reload,
+    Quit,
+    HaltLoop,
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuiltinChordAction {
+    pub command: BuiltinChordKind,
+    pub argument: Option<String>,
+}
+
+impl BuiltinChordAction {
+    pub fn resolve(&self, trigger: &ChordTrigger, keys: &[Key]) -> Result<MetaChordCommand> {
+        Ok(match self.command {
+            BuiltinChordKind::Settings => MetaChordCommand::Settings,
+            BuiltinChordKind::Reload => MetaChordCommand::Reload,
+            BuiltinChordKind::Quit => MetaChordCommand::Quit,
+            BuiltinChordKind::HaltLoop => {
+                let argument = self
+                    .argument
+                    .as_deref()
+                    .context("halt-loop requires an argument")?;
+                let input = Key::serialize_sequence(keys).context("invalid meta chord")?;
+                let value = if let Some(capture) = argument.strip_prefix('$') {
+                    let ChordTrigger::Pattern(pattern) = trigger else {
+                        anyhow::bail!("halt-loop capture requires a regex trigger");
+                    };
+                    let captures = pattern
+                        .captures(&input)
+                        .context("meta chord did not match")?;
+                    captures
+                        .get(
+                            capture
+                                .parse::<usize>()
+                                .context("invalid loop ID capture")?,
+                        )
+                        .context("loop ID capture not found")?
+                        .as_str()
+                        .to_owned()
+                } else {
+                    argument.to_owned()
+                };
+                MetaChordCommand::Halt(value.parse().context("invalid loop ID")?)
+            }
+        })
     }
 }
 

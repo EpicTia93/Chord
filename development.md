@@ -175,6 +175,13 @@ The project tool versions are declared in [`.prototools`](./.prototools). Rust i
 
 ## Editing an installed chordpack locally
 
+Chord's core `0` bindings live in the sibling checkout at
+`../chords/@keychord/chords-chord/chords/com/leonsilicon/chord/macos.toml`.
+Development builds and reloads read that file directly. Keep its distribution copy
+at `apps/chord-tauri/data/chords-chord/chords/com/leonsilicon/chord/macos.toml`
+in sync; builds without the sibling checkout embed that copy. The core file is
+always loaded globally and cannot be disabled or replaced by another package source.
+
 In Settings → Chords, choose **Link Local Folder** on an installed chord repo and
 enter the absolute path to your local checkout. Its `package.json` name must match
 the installed package. Links also work for pinned chordpacks and persist across

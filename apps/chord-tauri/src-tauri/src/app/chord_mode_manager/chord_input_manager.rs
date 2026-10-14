@@ -7,7 +7,9 @@ use crate::models::{
     ChordEventTrigger, ChordInputEvent, ChordKeyboardEvent, ChordTaskAction, Key, KeyEvent,
     MetaChordCommand,
 };
-use crate::state::{ChordExecutionObservable, ChordInputObservable, ChordInputState, Observable};
+use crate::state::{
+    ChordExecutionObservable, ChordInputObservable, ChordInputState, MetaChordHint, Observable,
+};
 use anyhow::{Result, bail};
 use keycode::KeyMappingCode;
 use nject::injectable;
@@ -44,6 +46,15 @@ impl ChordInputManager {
 
     pub fn stop_loops(&self) -> Result<()> {
         self.loops.stop_all(&self.execution_observable)
+    }
+
+    pub fn configure_meta_commands(
+        &self,
+        hints: Vec<MetaChordHint>,
+        halt_loop_template: String,
+    ) -> Result<()> {
+        self.loops
+            .configure_meta_commands(&self.execution_observable, hints, halt_loop_template)
     }
 
     /// Execute a complete chord sequence without synthesizing keyboard input.

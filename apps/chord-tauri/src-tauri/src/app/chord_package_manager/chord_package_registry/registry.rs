@@ -27,6 +27,8 @@ impl ChordPackageRegistry {
         packages.extend(self.git.import_packages(true)?);
         packages.extend(self.local.import_all_packages()?);
 
+        super::core::protect_core_package(&mut packages)?;
+
         Ok(packages)
     }
 }

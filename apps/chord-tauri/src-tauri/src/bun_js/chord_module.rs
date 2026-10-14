@@ -695,7 +695,7 @@ mod tests {
                 let result = async {
                     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
                     for (index, module_relpath) in
-                        ["js/tray.js", "js/@keychord/chords-tray/js/tray.js"]
+                        ["js/tray.js", "js/@keychord/chords-menu/js/tray.js"]
                             .into_iter()
                             .enumerate()
                     {

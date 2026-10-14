@@ -35,3 +35,16 @@ export function getRepeatPrefixTokens(tokens: string[]) {
 	const commandStart = tokens.findIndex(token => !/^\d$/.test(token));
 	return tokens.slice(0, commandStart === -1 ? tokens.length : commandStart);
 }
+
+export function getRangeHint(hint: { prefix: string[], keys: string[], description: string, isRepeatCount: boolean }, repeatPrefixTokens: string[]) {
+	const keys = hint.isRepeatCount && repeatPrefixTokens.length > 0
+		? ['0', ...hint.keys.filter(key => key !== '0')]
+		: hint.keys;
+	return {
+		prefix: [...repeatPrefixTokens, ...hint.prefix],
+		// Keep the dedicated loop row at the start of a sequence.
+		keys: hint.isRepeatCount && repeatPrefixTokens.length === 0 ? keys.filter(key => key !== '1') : keys,
+		label: keys.length === 1 ? keys[0]! : `${keys[0]}-${keys.at(-1)}`,
+		description: hint.description,
+	};
+}

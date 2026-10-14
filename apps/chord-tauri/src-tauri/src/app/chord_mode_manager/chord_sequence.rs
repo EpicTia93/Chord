@@ -2,7 +2,7 @@ use crate::app::chord_package_manager::{ChordPackage, ChordReference};
 use crate::app::chord_runner::ChordActionTask;
 use crate::models::{
     ChordAction, ChordCommand, ChordEventTrigger, ChordInputEvent, ChordKeyboardEvent, ChordRepeat,
-    ChordTaskAction, MetaChordCommand,
+    ChordTaskAction, MetaChordCommand, is_core_chords_file,
 };
 use anyhow::Result;
 use parking_lot::Mutex;
@@ -56,8 +56,24 @@ impl ChordSequence {
         matching: impl FnOnce(&ChordInputEvent) -> Vec<(ChordPackage, ChordReference)>,
     ) -> Result<ChordSequenceDispatch> {
         let (keys, repeat) = match ChordCommand::parse(&raw_event.input)? {
-            ChordCommand::Meta(command) => {
-                let command = command.filter(|_| triggers.contains(&ChordEventTrigger::Input));
+            ChordCommand::Meta => {
+                let mut command = None;
+                if triggers.contains(&ChordEventTrigger::Input) {
+                    for (_, reference) in matching(&raw_event) {
+                        if !is_core_chords_file(
+                            &reference.package_name,
+                            &reference.chords_file_pathslug,
+                        ) {
+                            continue;
+                        }
+                        if let Some(ChordAction::Builtin(action)) = reference.chord.actions.first()
+                        {
+                            command =
+                                Some(action.resolve(&reference.chord.trigger, &raw_event.input)?);
+                            break;
+                        }
+                    }
+                }
                 return Ok(ChordSequenceDispatch {
                     expired: self.reset(),
                     input_event: command.map(|_| raw_event),
@@ -556,24 +572,70 @@ name = "fixture"
             panic!()
         };
         assert_ne!(later_action.sequence_id, action.sequence_id);
-        for input in ["0s", "0r", "0q", "0h12", "0x", "0h12x"] {
-            let dispatch = sequence
-                .dispatch_command(event(input), &[ChordEventTrigger::Input], None, |_| {
-                    panic!("meta commands must not visit packages")
-                })
-                .unwrap();
-            assert!(dispatch.tasks.is_empty() && dispatch.loop_task.is_none());
-            assert_eq!(
-                dispatch.input_event.is_some(),
-                !["0x", "0h12x"].contains(&input)
-            );
-        }
         let typing = sequence
             .dispatch_command(event("0s"), &[ChordEventTrigger::Keydown], None, |_| {
                 panic!("meta commands must not visit packages")
             })
             .unwrap();
         assert!(typing.meta_command.is_none());
+    }
+
+    #[test]
+    fn meta_dispatch_uses_only_the_protected_file_and_its_configured_bindings() {
+        use crate::models::{CORE_CHORD_FILE, CORE_CHORD_PACKAGE};
+        let mut core = fixture("name = 'fixture'");
+        let path = PathBuf::from(CORE_CHORD_FILE);
+        let source = include_str!(concat!(env!("OUT_DIR"), "/chords-chord.macos.toml"))
+            .replace("'0s'", "'0x'");
+        let parsed = ParsedChordsFile::parse_core(&source).unwrap();
+        core.name = CORE_CHORD_PACKAGE.into();
+        core.global_chords = parsed
+            .chords
+            .iter()
+            .map(|chord| ChordReference {
+                package_name: core.name.clone(),
+                chords_file_pathslug: path.clone(),
+                chord: chord.clone(),
+            })
+            .collect();
+        let other = fixture("name = 'fixture'\n[chords]\n'(.*)' = { '@input:input' = [] }");
+        let mut sequence = ChordSequence::default();
+        for (input, expected) in [
+            ("0x", Some(MetaChordCommand::Settings)),
+            ("0s", None),
+            ("0r", Some(MetaChordCommand::Reload)),
+            ("0q", Some(MetaChordCommand::Quit)),
+            ("0h12", Some(MetaChordCommand::Halt(12))),
+            ("0h12x", None),
+            ("0unknown", None),
+        ] {
+            let dispatch = sequence
+                .dispatch_command(event(input), &[ChordEventTrigger::Input], None, |e| {
+                    let mut matches = contexts(&other, e);
+                    matches.extend(
+                        core.matching_global_chords(e)
+                            .into_iter()
+                            .map(|r| (core.clone(), r)),
+                    );
+                    matches
+                })
+                .unwrap();
+            assert_eq!(dispatch.meta_command, expected);
+            assert_eq!(dispatch.input_event.is_some(), expected.is_some());
+            assert!(dispatch.tasks.is_empty() && dispatch.loop_task.is_none());
+        }
+        let overflow = sequence.dispatch_command(
+            event("0h4294967296"),
+            &[ChordEventTrigger::Input],
+            None,
+            |e| {
+                core.matching_global_chords(e)
+                    .into_iter()
+                    .map(|r| (core.clone(), r))
+                    .collect()
+            },
+        );
+        assert!(overflow.is_err());
     }
 
     #[tokio::test]

@@ -112,6 +112,7 @@ impl GitReposStore {
     pub fn remove_repo(&self, slug: &str) -> Result<()> {
         let id = slug.trim().to_string();
         anyhow::ensure!(!id.is_empty(), "Repository cannot be empty");
+        ensure_repo_removable(&id)?;
 
         let state = self.observable.get_state()?;
         let mut repos = state.repos.clone();
@@ -269,6 +270,25 @@ impl GitReposStore {
             .transpose()?;
         self.upsert(repo.clone())?;
         Ok(repo)
+    }
+}
+
+fn ensure_repo_removable(slug: &str) -> Result<()> {
+    anyhow::ensure!(!slug.eq_ignore_ascii_case(crate::models::CORE_CHORD_REPO),
+        "Chord's core bindings are required and cannot be removed");
+    Ok(())
+}
+
+#[cfg(test)]
+mod core_protection_tests {
+    use super::*;
+
+    #[test]
+    fn core_repo_cannot_be_removed_but_other_pinned_repos_can() {
+        for slug in ["KeyChord/chords-chord", "keychord/chords-chord", "KEYCHORD/CHORDS-CHORD"] {
+            assert!(ensure_repo_removable(slug).is_err());
+        }
+        ensure_repo_removable("KeyChord/chords-os").unwrap();
     }
 }
 

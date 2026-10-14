@@ -228,12 +228,15 @@ function GitRepoRow({
 }
 
 function RepoActionsMenuButton({ repo }: { repo: { slug: string } }) {
+  const isRequired = repo.slug.toLowerCase() === "keychord/chords-chord";
   const removeGitRepoMutation = useMutation({
     mutationFn: taurpc.removeGitRepo,
     onSuccess: () => {
       toast.success(`Removed ${repo.slug}.`);
     },
   });
+
+  if (isRequired) return <Badge variant="outline">Required</Badge>;
 
   return (
     <DropdownMenu>

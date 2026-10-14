@@ -1,7 +1,7 @@
 use crate::app::AppHandleExt;
 use crate::app::chord_runner::ChordActionTask;
 use crate::models::{ChordTaskAction, Key};
-use crate::state::{ChordExecutionObservable, Observable, RunningChordLoop};
+use crate::state::{ChordExecutionObservable, MetaChordHint, Observable, RunningChordLoop};
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
@@ -51,6 +51,21 @@ pub(super) struct ChordLoops {
 }
 
 impl ChordLoops {
+    pub fn configure_meta_commands(
+        &self,
+        observable: &ChordExecutionObservable,
+        hints: Vec<MetaChordHint>,
+        halt_loop_template: String,
+    ) -> Result<()> {
+        let registry = self.registry.lock();
+        observable.set_state(|mut state| {
+            state.loops = registry.snapshot();
+            state.meta_commands = hints;
+            state.halt_loop_template = halt_loop_template;
+            state
+        })
+    }
+
     pub fn reserve(
         &self,
         task: &ChordActionTask,
@@ -58,6 +73,7 @@ impl ChordLoops {
     ) -> Result<(u32, watch::Receiver<bool>)> {
         let input = Key::serialize_sequence(&task.event.input).context("invalid loop chord")?;
         let mut registry = self.registry.lock();
+        let halt_template = observable.get_state()?.halt_loop_template;
         let (id, receiver) = registry.reserve(input)?;
         if let Err(error) = observable.set_state(|mut state| {
             state.loops = registry.snapshot();
@@ -66,7 +82,8 @@ impl ChordLoops {
             registry.remove(id);
             return Err(error);
         }
-        log::info!("Started chord loop {id}; halt with 0h{id}");
+        let halt = halt_template.replace("{id}", &id.to_string());
+        log::info!("Started chord loop {id}; halt with {halt}");
         Ok((id, receiver))
     }
 

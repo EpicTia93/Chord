@@ -22,7 +22,7 @@ pub const LOCAL_MONOREPOS_KEY: &str = "localMonorepos";
 const MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PACKAGE_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
 
-fn read_package_source(path: &Path, remaining: &mut u64) -> anyhow::Result<String> {
+pub(super) fn read_package_source(path: &Path, remaining: &mut u64) -> anyhow::Result<String> {
     anyhow::ensure!(
         fs::metadata(path)?.is_file(),
         "package source {} must be a regular file",
@@ -146,6 +146,7 @@ impl LocalPackageRegistry {
     ) -> anyhow::Result<Option<Vec<String>>> {
         let root = self.monorepo_root(source)?;
         let available = super::import_monorepo_packages(&root)?;
+        super::core::ensure_core_selected(&available, &names)?;
         anyhow::ensure!(
             names.iter().all(|name| available.contains_key(name)),
             "Unknown monorepo package"

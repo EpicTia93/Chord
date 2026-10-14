@@ -17,7 +17,7 @@ pub async fn list_monorepo_packages(
     let mut packages: Vec<_> = import_monorepo_packages(&root)?
         .into_keys()
         .map(|name| {
-            let enabled = selected.contains(&name);
+            let enabled = name == crate::models::CORE_CHORD_PACKAGE || selected.contains(&name);
             (name, enabled)
         })
         .collect();

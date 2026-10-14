@@ -51,7 +51,7 @@ Build its two deliberately unsafe fixtures against an existing NodeSwift 1.5.1
 SwiftPM cache, such as the tray package's debug build:
 
     bun apps/chord-tauri/src-tauri/tests/package-isolation/build-legacy-probes.ts \
-      ../chords/@keychord/chords-tray/node_modules/.cache/chord/native/swiftpm
+      ../chords/@keychord/chords-menu/node_modules/.cache/chord/native/swiftpm
     CHORD_PACKAGE_TEST_HOST="$PWD/apps/chord-tauri/src-tauri/target/debug/chord" \
       CHORD_LEGACY_NATIVE_FIXTURE=/tmp/chord-legacy-node-swift-probes \
       CARGO_INCREMENTAL=0 cargo test --manifest-path apps/chord-tauri/src-tauri/Cargo.toml \

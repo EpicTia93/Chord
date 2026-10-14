@@ -19,32 +19,12 @@ pub struct MetaChordHint {
 }
 
 #[typeshare]
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ChordExecutionState {
     pub loops: Vec<RunningChordLoop>,
     pub meta_commands: Vec<MetaChordHint>,
-}
-
-impl Default for ChordExecutionState {
-    fn default() -> Self {
-        Self {
-            loops: vec![],
-            meta_commands: [
-                ("0", "Chord settings"),
-                ("0s", "Settings"),
-                ("0r", "Reload config"),
-                ("0q", "Quit Chord"),
-                ("0h", "Halt loop by ID"),
-            ]
-            .into_iter()
-            .map(|(sequence, name)| MetaChordHint {
-                sequence: sequence.into(),
-                name: name.into(),
-            })
-            .collect(),
-        }
-    }
+    pub halt_loop_template: String,
 }
 
 define_observable!(

@@ -26,11 +26,24 @@ export interface AppSettingsState {
 	isChordPanelHiddenByDefault: boolean;
 }
 
+export enum BuiltinChordKind {
+	Settings = "settings",
+	Reload = "reload",
+	Quit = "quit",
+	HaltLoop = "halt-loop",
+}
+
+export interface BuiltinChordAction {
+	command: BuiltinChordKind;
+	argument?: string;
+}
+
 /** The action that a chord can define. */
 export type ChordAction = 
 	| { type: "shortcut", content: ShortcutChordAction }
 	| { type: "shell", content: ShellChordAction }
-	| { type: "emit", content: EmitChordAction };
+	| { type: "emit", content: EmitChordAction }
+	| { type: "builtin", content: BuiltinChordAction };
 
 /** A mapping from a sequence (or pattern) of keys to a series of actions. */
 export interface Chord {
@@ -80,6 +93,7 @@ export interface MetaChordHint {
 export interface ChordExecutionState {
 	loops: RunningChordLoop[];
 	metaCommands: MetaChordHint[];
+	haltLoopTemplate: string;
 }
 
 export interface ChordHint {

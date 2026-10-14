@@ -2,6 +2,7 @@
 pub mod git;
 
 mod config;
+pub(super) mod core;
 pub use config::*;
 mod local;
 pub use local::*;

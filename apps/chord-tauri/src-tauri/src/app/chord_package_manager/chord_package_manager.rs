@@ -5,6 +5,7 @@ use crate::app::state::AppSingleton;
 use crate::models::{
     ChordEventTrigger, ChordInput, ChordInputEvent, ChordsFileImportOverride, CompiledChordsFile,
     CompiledChordsFileHandler, FilePathslug, ParsedChordsFile, RawChordPackage, RawChordsFile,
+    CORE_CHORD_PACKAGE, is_core_chords_file,
 };
 use crate::state::{
     ChordPackageManagerObservable, ChordPackageManagerState, GitReposObservable, Observable,
@@ -370,6 +371,14 @@ file = 42
 }
 
 impl ChordPackageManager {
+    pub(super) fn init_core_package(&self) -> Result<()> {
+        let package = super::chord_package_registry::core::load_core_package()?;
+        let (hints, halt_template) = super::chord_package_registry::core::meta_configuration(&package)?;
+        self.packages.write().insert(package.name.clone(), package.clone());
+        self.observable.set_state(|_| ChordPackageManagerState { packages: vec![package] })?;
+        self.handle.app_state().chord_mode_manager().configure_meta_commands(hints, halt_template)
+    }
+
     pub async fn set_monorepo_packages(&self, source: &str, names: Vec<String>) -> Result<()> {
         // Keep selection changes and their rollback serialized with every other reload.
         let _reload_guard = self.reload_lock.lock().await;
@@ -464,12 +473,15 @@ impl ChordPackageManager {
         // Ordinary reloads retain usable files from partially broken packages. A newly
         // selected package must load completely before its selection can be accepted.
         ensure_selected_packages_loaded(required_packages, &package_errors)?;
+        let core = chord_packages.get(CORE_CHORD_PACKAGE).context("Chord's core package must remain loaded")?;
+        let (hints, halt_template) = super::chord_package_registry::core::meta_configuration(core)?;
 
         let next_handler_ids = handler_ids(&chord_packages);
         let observable_packages = chord_packages.values().cloned().collect();
 
         *self.packages.write() = chord_packages;
         *self.package_roots.write() = next_roots;
+        self.handle.app_state().chord_mode_manager().configure_meta_commands(hints, halt_template)?;
         let observable_result = self.observable.set_state(|_| ChordPackageManagerState {
             packages: observable_packages,
         });
@@ -529,7 +541,11 @@ impl ChordPackageManager {
                 continue;
             };
             raw_chords_files.insert(path.clone(), raw);
-            match parse_package_chords_file(&path, &contents) {
+            let parsed = if is_core_chords_file(&name, &path) {
+                ParsedChordsFile::parse_core(&contents)
+                    .with_context(|| format!("Failed to parse protected core file {}", path.display()))
+            } else { parse_package_chords_file(&path, &contents) };
+            match parsed {
                 Ok(parsed) => {
                     parsed_chords_files.insert(path, parsed);
                 }
@@ -578,7 +594,7 @@ impl ChordPackageManager {
                             let is_non_alphanumeric =
                                 first_char.map(|c| !c.is_alphanumeric()).unwrap_or(false);
 
-                            if is_non_alphanumeric {
+                            if is_non_alphanumeric || is_core_chords_file(&name, pathslug) {
                                 global_chords.push(ChordReference {
                                     package_name: name.clone(),
                                     chords_file_pathslug: pathslug.clone(),

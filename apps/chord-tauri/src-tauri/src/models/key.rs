@@ -5,6 +5,13 @@ use std::str::FromStr;
 use derive_more::Display;
 use typeshare::typeshare;
 
+const SPECIAL_KEY_SEQUENCES: [(&str, KeyMappingCode); 4] = [
+    (r"\up", ArrowUp),
+    (r"\left", ArrowLeft),
+    (r"\down", ArrowDown),
+    (r"\right", ArrowRight),
+];
+
 #[derive(Debug, PartialEq)]
 pub enum KeyEvent {
     Press(Key),
@@ -600,18 +607,26 @@ impl Key {
         Some(result)
     }
 
+    pub(crate) fn validate_sequence_escapes(sequence: &str) -> Result<()> {
+        for (index, _) in sequence.match_indices('\\') {
+            anyhow::ensure!(
+                SPECIAL_KEY_SEQUENCES
+                    .iter()
+                    .any(|(token, _)| sequence[index..].starts_with(token)),
+                "invalid special-key escape in chord sequence {sequence:?}: backslash must introduce \\up, \\left, \\down, or \\right"
+            );
+        }
+        Ok(())
+    }
+
     pub fn parse_sequence(sequence: &str) -> Result<Vec<Key>> {
+        Self::validate_sequence_escapes(sequence)?;
         let mut keys = Vec::new();
         let mut remaining = sequence;
         while !remaining.is_empty() {
-            if let Some((token, key)) = [
-                (r"\up", ArrowUp),
-                (r"\left", ArrowLeft),
-                (r"\down", ArrowDown),
-                (r"\right", ArrowRight),
-            ]
-            .into_iter()
-            .find(|(token, _)| remaining.starts_with(token))
+            if let Some((token, key)) = SPECIAL_KEY_SEQUENCES
+                .into_iter()
+                .find(|(token, _)| remaining.starts_with(token))
             {
                 keys.push(Key(key));
                 remaining = &remaining[token.len()..];
@@ -645,6 +660,25 @@ mod sequence_tests {
             Key(KeyA), Key(ArrowUp), Key(ArrowLeft), Key(ArrowDown), Key(ArrowRight), Key(KeyB),
         ]);
         assert_eq!(Key::serialize_sequence(&keys).as_deref(), Some(sequence));
+    }
+
+    #[test]
+    fn backslash_is_reserved_for_special_key_escapes() {
+        for sequence in [
+            r"\", r"a\", r"\u", r"\s", r"\unknown", r"a\\up", r"a\up\q",
+        ] {
+            let error = Key::parse_sequence(sequence).unwrap_err();
+            assert!(
+                error.to_string().contains("invalid special-key escape"),
+                "{error}"
+            );
+        }
+        // Backslash remains available as a physical key in shortcuts and the input buffer.
+        assert_eq!(Key::from_str("backslash").unwrap(), Key(Backslash));
+        assert_eq!(
+            Key::serialize_sequence(&[Key(Backslash)]).as_deref(),
+            Some(r"\")
+        );
     }
 }
 

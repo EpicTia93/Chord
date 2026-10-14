@@ -3,8 +3,8 @@ import { cn } from '@chord/com.npmjs.utils-cn';
 import { Kbd } from '@chord/dev.improve.chord.components.ui.kbd';
 import { StateQueries, useChordExecutionState, useChordInputState, useChordPackageManagerState, useChordPanelState, useFrontmostState, useKeyboardState } from '@chord/dev.improve.chord.lib.state';
 import { emit, listen } from '@tauri-apps/api/event';
-import { getRepeatPrefixTokens, normalizeChordTokens, normalizeToken } from '#chord-tokens';
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { getRangeHint, getRepeatPrefixTokens, normalizeChordTokens, normalizeToken } from '#chord-tokens';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 const LETTER_TOKENS = Array.from({ length: 26 }, (_, index) =>
 	String.fromCharCode('A'.charCodeAt(0) + index));
@@ -29,7 +29,6 @@ function sortTokens(tokens: Iterable<string>) {
 
 function ChordKeyRow({
 	token,
-	rangeEnd,
 	description = '',
 	isSelected = false,
 	isDimmed = false,
@@ -37,7 +36,6 @@ function ChordKeyRow({
 	descriptionFontSize,
 }: {
 	token: string
-	rangeEnd?: string
 	description?: string
 	isSelected?: boolean
 	isDimmed?: boolean
@@ -52,28 +50,22 @@ function ChordKeyRow({
 				'text-foreground/95',
 			)}
 		>
-			<div className="flex shrink-0 items-center gap-2">
-				{(rangeEnd ? [token, rangeEnd] : [token]).map((keyToken, index) => (
-					<Fragment key={index}>
-						{index > 0 && <span aria-hidden="true">-</span>}
-						<Kbd
-							style={{
-								height: `${keySize}px`,
-								minWidth: `${keySize}px`,
-								fontSize: `${Math.max(12, Math.round(keySize * 0.48))}px`,
-							}}
-							className={cn(
-								'rounded-md border px-0 font-mono shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_1px_2px_rgba(0,0,0,0.18)]',
-								isSelected
-									? 'border-emerald-400/90 bg-emerald-100 text-emerald-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.5),0_0_0_1px_rgba(52,211,153,0.35),0_4px_10px_rgba(16,185,129,0.25)]'
-									: 'border-border/80 bg-background/95 text-foreground',
-							)}
-						>
-							{keyToken}
-						</Kbd>
-					</Fragment>
-				))}
-			</div>
+			<Kbd
+				style={{
+					height: `${keySize}px`,
+					minWidth: `${keySize}px`,
+					fontSize: `${Math.max(12, Math.round(keySize * 0.48))}px`,
+				}}
+				className={cn(
+					'shrink-0 rounded-md border font-mono shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_1px_2px_rgba(0,0,0,0.18)]',
+					token.length > 1 ? 'px-2' : 'px-0',
+					isSelected
+						? 'border-emerald-400/90 bg-emerald-100 text-emerald-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.5),0_0_0_1px_rgba(52,211,153,0.35),0_4px_10px_rgba(16,185,129,0.25)]'
+						: 'border-border/80 bg-background/95 text-foreground',
+				)}
+			>
+				{token}
+			</Kbd>
 			<div style={{ fontSize: `${descriptionFontSize}px` }}>{description}</div>
 		</div>
 	);
@@ -109,7 +101,7 @@ function ChordsPageContent({
 	const keyboardState = keyboardData;
 	const { frontmostAppBundleId } = frontmostData;
 	const { packages } = chordPackageManagerData;
-	const { loops, metaCommands } = chordExecutionData;
+	const { loops, metaCommands, haltLoopTemplate } = chordExecutionData;
 
 	const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
 	const [surfaceVersion, setSurfaceVersion] = useState(0);
@@ -184,6 +176,7 @@ function ChordsPageContent({
 	const activeAppChords: Chord[] = [];
 	const hintsByRawPattern: Record<string, ChordHint> = {};
 	const globalChords: ChordReference[] = [];
+	const repeatCountHints = new Set<ChordHint>();
 
 	for (const chordPackage of packages) {
 		globalChords.push(...chordPackage.globalChords);
@@ -191,6 +184,12 @@ function ChordsPageContent({
 		for (const [relpath, file] of Object.entries(chordPackage.compiledChordsFiles)) {
 			const bundleId = relpath.split('/').slice(1, -1).join('.');
 			for (const hint of file.chordHints) {
+				if (chordPackage.name === '@keychord/chords-chord'
+					&& 'range' in hint.pattern
+					&& hint.pattern.range.prefix.length === 0
+					&& hint.pattern.range.keys.every(key => /^\d$/.test(normalizeToken(key)))) {
+					repeatCountHints.add(hint);
+				}
 				// bad check for global
 				if (hint.rawPattern[0]?.toUpperCase() === hint.rawPattern[0]) {
 					hintsByRawPattern[hint.rawPattern] = hint;
@@ -225,6 +224,7 @@ function ChordsPageContent({
 						prefix: hint.pattern.range.prefix.map(normalizeToken),
 						keys: hint.pattern.range.keys.map(normalizeToken),
 						description: hint.description,
+						isRepeatCount: repeatCountHints.has(hint),
 					},
 				]
 			: [],
@@ -244,17 +244,14 @@ function ChordsPageContent({
 	const repeatPrefixTokens = getRepeatPrefixTokens(selectedTokens);
 	const builtinHints = [
 		...metaCommands,
-		...loops.map(loop => ({ sequence: `0h${loop.id}`, name: `Halt loop ${loop.id}: ${loop.input}` })),
+		...loops.map(loop => ({ sequence: haltLoopTemplate.replace('{id}', String(loop.id)), name: `Halt loop ${loop.id}: ${loop.input}` })),
 	].map(hint => ({ tokens: [...hint.sequence].map(normalizeToken), description: hint.name }));
 	const hintSequences = [
 		...baseHintSequences.map(hint => ({ ...hint, tokens: [...repeatPrefixTokens, ...hint.tokens] })),
 		...(repeatPrefixTokens.length === 0 ? builtinHints : []),
-		...Array.from({ length: repeatPrefixTokens.length ? 10 : 9 }, (_, index) => {
-			const digit = String(index + (repeatPrefixTokens.length ? 0 : 1));
-			return { tokens: [...repeatPrefixTokens, digit], description: repeatPrefixTokens.length === 0 && digit === '1' ? 'Loop chord' : 'Repeat count' };
-		}),
+		...(repeatPrefixTokens.length === 0 ? [{ tokens: ['1'], description: 'Loop chord' }] : []),
 	];
-	const rangeHints = baseRangeHints.map(hint => ({ ...hint, prefix: [...repeatPrefixTokens, ...hint.prefix] }));
+	const rangeHints = baseRangeHints.map(hint => getRangeHint(hint, repeatPrefixTokens));
 
 	const maxVisibleRows = 20;
 	const availableHeight = Math.max(viewportHeight - 96, 240);
@@ -275,6 +272,7 @@ function ChordsPageContent({
 		},
 		(_, columnIndex) => {
 			const prefixTokens = selectedTokens.slice(0, columnIndex);
+			const selectedToken = selectedTokens[columnIndex];
 			const getChordKeys = (chord: Chord) => 'keys' in chord.trigger ? [...repeatPrefixTokens, ...normalizeChordTokens(chord.trigger.keys)] : [];
 
 			const matchingChords = activeChords.filter(chord =>
@@ -285,6 +283,9 @@ function ChordsPageContent({
 					.map(chord => getChordKeys(chord)[columnIndex])
 					.filter((token): token is string => Boolean(token)),
 			);
+			if (selectedToken) {
+				activeTokens.add(selectedToken);
+			}
 			// Explicit hints are options even when their handler uses a regex trigger.
 			const matchingHints = hintSequences.filter(hint =>
 				prefixTokens.every((token, tokenIndex) => hint.tokens[tokenIndex] === token),
@@ -316,16 +317,18 @@ function ChordsPageContent({
 
 				return {
 					token,
-					rangeEnd: undefined as string | undefined,
 					keys: [token],
 					description: exactHint?.description ?? hintsByRawPattern[sequenceKey]?.description ?? exactChord?.name ?? '',
 				};
 			});
 
 			for (const range of matchingRanges) {
+				const token = range.label;
+				// Later range hints take precedence when they use the same label.
+				const existingIndex = rows.findIndex(row => row.token === token);
+				if (existingIndex !== -1) rows.splice(existingIndex, 1);
 				rows.push({
-					token: range.keys[0]!,
-					rangeEnd: range.keys.at(-1)!,
+					token,
 					keys: range.keys,
 					description: range.description,
 				});
@@ -336,8 +339,8 @@ function ChordsPageContent({
 			return {
 				id: `column-${columnIndex}`,
 				rows,
-				selectedToken: selectedTokens[columnIndex],
-				hasSelection: Boolean(selectedTokens[columnIndex]),
+				selectedToken,
+				hasSelection: Boolean(selectedToken),
 			};
 		},
 	);
@@ -371,7 +374,7 @@ function ChordsPageContent({
 						{loops.length > 0 && (
 							<div className="mb-3 flex max-h-24 flex-col gap-1 overflow-y-auto text-xs text-foreground/80">
 								{loops.map(loop => (
-									<div key={loop.id}>Loop {loop.id}: <code>{loop.input}</code> · Halt: <code>0h{loop.id}</code></div>
+									<div key={loop.id}>Loop {loop.id}: <code>{loop.input}</code> · Halt: <code>{haltLoopTemplate.replace('{id}', String(loop.id))}</code></div>
 								))}
 							</div>
 						)}
@@ -392,9 +395,8 @@ function ChordsPageContent({
 										: null}
 									{column.rows.map(row => (
 										<ChordKeyRow
-											key={`${column.id}-${row.token}-${row.rangeEnd ?? ''}`}
+											key={`${column.id}-${row.token}`}
 											token={row.token}
-											rangeEnd={row.rangeEnd}
 											description={row.description}
 											isSelected={row.keys.includes(column.selectedToken)}
 											isDimmed={column.hasSelection && !row.keys.includes(column.selectedToken)}

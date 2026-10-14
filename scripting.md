@@ -14,9 +14,12 @@ TODO
 
 ### Meta commands, repetition, and special keys
 
-The leading `0` namespace belongs to Chord in every focused app. Packages and user
-configuration cannot define `0` commands or hints, and user regexes cannot intercept
-them. Complete built-in commands with the normal chord completion controls or the CLI:
+The leading `0` namespace belongs to Chord in every focused app. Its bindings and help
+are defined in `@keychord/chords-chord/chords/com/leonsilicon/chord/macos.toml`.
+This protected core file is always loaded, even before optional repositories load,
+and cannot be removed, deselected, or overridden. Other files cannot define `0`
+commands, hints, or `builtin` actions, and user regexes cannot intercept them.
+Complete built-in commands with the normal chord completion controls or the CLI:
 
 | Command | Action |
 | --- | --- |
@@ -26,6 +29,18 @@ them. Complete built-in commands with the normal chord completion controls or th
 | `0h<ID>` | Halt the loop with that numeric ID, for example `0h12` |
 
 These replace the former backslash Settings, Reload, and Quit sequences.
+
+The core file maps chords to native app operations using `builtin` actions:
+
+```toml
+[chords]
+'0s' = { name = "Settings", builtin = { command = "settings" } }
+'0h(\d+)' = { name = "Halt loop #$1", builtin = { command = "halt-loop", argument = "$1" } }
+```
+
+The supported operations are `settings`, `reload`, `quit`, and `halt-loop`.
+Only the protected core file has permission to use them. Installed builds bundle
+the file so the controls remain available without external package sources.
 
 Leading decimal digits set a chord's repeat count: `12ab` executes `ab` twelve times.
 Without a prefix the chord executes once; the prefix `1` starts an indefinite loop.
@@ -46,9 +61,12 @@ with a 10 ms pause between them so immediate actions leave time for other input.
 
 Backslash introduces special-key notation: `\up`, `\left`, `\down`, and `\right`
 represent arrow keys in TOML triggers and CLI sequences. For example, `'a\up'`
-matches `a` followed by the Up arrow, or the typed escape sequence. Use literal TOML
-strings (single quotes) to preserve backslashes. Backspace continues to edit the chord
-buffer.
+matches `a` followed by the Up arrow, or the typed escape sequence. Backslash is
+reserved for special keys; bare or unknown escapes cannot define chords or help
+hints. While typing an escape, the input stays pending until the special key is
+complete. Inside parenthesized regex sections, backslash keeps its regex meaning
+(for example, `(\d+)`). Use literal TOML strings (single quotes) to preserve
+backslashes. Backspace continues to edit the chord buffer.
 
 ### Handler events
 
@@ -452,16 +470,24 @@ Bun brings JavaScriptCore's JIT and Node/Bun APIs, including the Node-API loader
 
 ### Compact help ranges
 
-A help hint can end in a parenthesized letter or digit range:
+A help hint can end in a quoted letter or digit range:
 
 ```toml
 [chords]
-'?-(a-z)' = { name = "Menu item by letter" }
+'?"1-9"' = { name = "Number" }
+'?m"0-9"' = { name = "Menu item number" }
+'?-"a-z"' = { name = "Menu item by letter" }
 ```
 
-After pressing `-`, the help panel shows one row with separate `A` and `Z`
-keycaps and a dash between them. The row replaces individual options in that
-range and highlights when any covered key is selected. Ranges are inclusive,
+The first hint shows one physical keycap containing `1-9`. After pressing `m`,
+the second shows `0-9`; after `-`, the third shows `A-Z`. Each row replaces
+individual options in that range and highlights when any covered key is selected. Ranges are inclusive,
 ascending, and use lowercase letters (`a-z`) or digits (`0-9`). The prefix
 before the range is a normal key sequence. Hints describe options; they do not
-create executable chord bindings.
+create executable chord bindings. Parenthesized hints such as `?-(a-z)` remain
+supported and use the same compact keycap display.
+
+The core `@keychord/chords-chord` package defines repeat-count help with
+`'?"1-9"' = { name = "Repeat count" }`. The panel extends this range to `0-9`
+after a numeric prefix. At the start of a sequence, `0` (Chord settings) and
+`1` (Loop chord) also keep their dedicated rows.

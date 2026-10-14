@@ -2,8 +2,8 @@ use super::Key;
 use crate::models::path::FilePathslug;
 use crate::models::toml::TomlValue;
 use crate::models::{
-    Chord, ChordAction, ChordEventTrigger, ChordHint, ChordHintPattern, ChordTrigger,
-    EmitChordAction, ShellChordAction, ShortcutChordAction, SimulatedShortcut,
+    BuiltinChordAction, Chord, ChordAction, ChordEventTrigger, ChordHint, ChordHintPattern,
+    ChordTrigger, EmitChordAction, ShellChordAction, ShortcutChordAction, SimulatedShortcut,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -197,10 +197,18 @@ impl ParsedChordsFile {
 
         let raw_pattern = &key[1..];
         // A terminal character range is a compact display hint, not a handler regex.
-        let range = Regex::new(r"^(?P<prefix>[^()]*)\((?P<start>[a-z0-9])-(?P<end>[a-z0-9])\)$")?;
+        let range = Regex::new(
+            r#"^(?P<prefix>[^()"]*)(?:"(?P<quoted>[a-z0-9]-[a-z0-9])"|\((?P<parenthesized>[a-z0-9]-[a-z0-9])\))$"#,
+        )?;
         let pattern = if let Some(captures) = range.captures(raw_pattern) {
-            let start = captures["start"].as_bytes()[0];
-            let end = captures["end"].as_bytes()[0];
+            let bounds = captures
+                .name("quoted")
+                .or_else(|| captures.name("parenthesized"))
+                .context("missing hint range bounds")?
+                .as_str()
+                .as_bytes();
+            let start = bounds[0];
+            let end = bounds[2];
             anyhow::ensure!(
                 start <= end && start.is_ascii_digit() == end.is_ascii_digit(),
                 "invalid hint range: {}",
@@ -237,10 +245,6 @@ impl ParsedChordsFile {
     }
 
     fn parse_trigger(key: &str, _value: &Table) -> Result<ChordTrigger> {
-        anyhow::ensure!(
-            !key.starts_with('0'),
-            "the 0 prefix is reserved for built-in Chord commands"
-        );
         let raw_trigger = key;
 
         let trigger = if raw_trigger.contains('(') {
@@ -254,6 +258,13 @@ impl ParsedChordsFile {
 
     fn parse_actions(_key: &str, value: &Table) -> Result<Vec<ChordAction>> {
         let mut actions = Vec::new();
+        if let Some(builtin) = value.get("builtin") {
+            let action: BuiltinChordAction = builtin
+                .clone()
+                .try_into()
+                .context("invalid built-in chord action")?;
+            actions.push(ChordAction::Builtin(action));
+        }
         if let Some(shortcut) = value.get("shortcut") {
             let shortcut = shortcut
                 .as_str()
@@ -334,6 +345,7 @@ fn parse_chord_pattern(raw: &str) -> Result<Regex> {
     let mut pattern = String::from(r"\A(?:");
     let mut remaining = raw;
     while let Some(start) = remaining.find('(') {
+        Key::validate_sequence_escapes(&remaining[..start])?;
         pattern.push_str(&regex::escape(&remaining[..start]));
         remaining = &remaining[start..];
         // Let the regex parser find the end of a complete group. This also handles
@@ -350,6 +362,7 @@ fn parse_chord_pattern(raw: &str) -> Result<Regex> {
         pattern.push(')');
         remaining = &remaining[end..];
     }
+    Key::validate_sequence_escapes(remaining)?;
     pattern.push_str(&regex::escape(remaining));
     pattern.push_str(r")\z");
     Ok(Regex::new(&pattern)?)
@@ -367,6 +380,22 @@ impl FromStr for ParsedChordsFile {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s, false)
+    }
+}
+
+impl ParsedChordsFile {
+    /// Only the registry's protected core file may opt into the meta namespace.
+    pub(crate) fn parse_core(s: &str) -> Result<Self> {
+        let parsed = Self::parse(s, true)?;
+        anyhow::ensure!(
+            parsed.handlers.is_empty() && parsed.imports.is_empty(),
+            "the protected core file must be self-contained"
+        );
+        Ok(parsed)
+    }
+
+    fn parse(s: &str, core: bool) -> Result<Self> {
         let value: toml::Value = toml::from_str(s)?;
         let root = value.as_table().context("root must be a table")?;
         let name = root
@@ -385,7 +414,7 @@ impl FromStr for ParsedChordsFile {
             let raw_chords = raw_chords.as_table().context("chords must be a table")?;
             for (key, value) in raw_chords {
                 anyhow::ensure!(
-                    !key.trim_start_matches('?').starts_with('0'),
+                    core || !key.trim_start_matches('?').starts_with('0'),
                     "the 0 prefix is reserved for built-in Chord commands: {key}"
                 );
                 let chord_value = {
@@ -403,6 +432,17 @@ impl FromStr for ParsedChordsFile {
                     }
                 };
 
+                anyhow::ensure!(
+                    core || !chord_value.contains_key("builtin"),
+                    "built-in actions are reserved for Chord's protected core file"
+                );
+                if core {
+                    anyhow::ensure!(
+                        key.trim_start_matches('?').starts_with('0'),
+                        "core Chord bindings must use the 0 prefix"
+                    );
+                }
+
                 if key.starts_with('?') {
                     if let Ok(hint) = Self::parse_hint(key, chord_value).inspect_err(|e| {
                         log::warn!("skipping hint {} because of parse error: {}", key, e)
@@ -410,6 +450,17 @@ impl FromStr for ParsedChordsFile {
                         chord_hints.push(hint);
                     }
                 } else {
+                    if core {
+                        let chord = Self::parse_chord(key, chord_value, index)?;
+                        anyhow::ensure!(
+                            chord.actions.len() == 1
+                                && matches!(chord.actions[0], ChordAction::Builtin(_)),
+                            "core Chord bindings must have one built-in action"
+                        );
+                        chords.push(chord);
+                        index += 1;
+                        continue;
+                    }
                     if let Ok(chord) = Self::parse_chord(key, chord_value, index).inspect_err(|e| {
                         log::warn!("skipping chord {} because of parse error: {}", key, e)
                     }) {
@@ -448,9 +499,22 @@ mod tests {
             assert!(error.to_string().contains("0 prefix is reserved"));
         }
         let file: ParsedChordsFile = "name = 'fixture'\n[chords]\n'(.*)' = { shell = 'true' }"
-            .parse().unwrap();
-        assert!(!file.chords[0].trigger.matches(&Key::parse_sequence("0s").unwrap()));
-        assert!(file.chords[0].trigger.matches(&Key::parse_sequence("ab").unwrap()));
+            .parse()
+            .unwrap();
+        assert!(
+            !file.chords[0]
+                .trigger
+                .matches(&Key::parse_sequence("0s").unwrap())
+        );
+        assert!(
+            file.chords[0]
+                .trigger
+                .matches(&Key::parse_sequence("ab").unwrap())
+        );
+        let error = "name = 'user'\n[chords]\nab = { builtin = { command = 'settings' } }"
+            .parse::<ParsedChordsFile>()
+            .unwrap_err();
+        assert!(error.to_string().contains("built-in actions are reserved"));
     }
 
     #[test]
@@ -462,8 +526,41 @@ mod tests {
 "#;
         let file: ParsedChordsFile = source.parse().unwrap();
         for input in [r"a\up", r"a\left12"] {
-            assert!(file.chords.iter().any(|chord|
-                chord.trigger.matches(&Key::parse_sequence(input).unwrap())));
+            assert!(
+                file.chords
+                    .iter()
+                    .any(|chord| chord.trigger.matches(&Key::parse_sequence(input).unwrap()))
+            );
+        }
+    }
+
+    #[test]
+    fn bare_backslash_hints_and_legacy_chords_are_skipped() {
+        let file: ParsedChordsFile = r#"name = 'fixture'
+[chords]
+'?\' = { name = 'System Actions' }
+'?\s' = { name = 'Settings' }
+'?\(1-9)' = { name = 'Legacy range' }
+'\s' = { shell = 'true' }
+'\s(\d+)' = { shell = 'true' }
+'a(\d+)\' = { shell = 'true' }
+'?\up' = { name = 'Move up' }
+'a\up' = { shortcut = 'up' }
+'a\left(\d+)' = { shell = 'true' }
+"#
+        .parse()
+        .unwrap();
+        assert_eq!(file.chord_hints.len(), 1);
+        assert_eq!(file.chord_hints[0].description, "Move up");
+        assert!(matches!(
+            &file.chord_hints[0].pattern,
+            ChordHintPattern::Keys(keys) if keys == &Key::parse_sequence(r"\up").unwrap()
+        ));
+        assert_eq!(file.chords.len(), 2);
+        for input in [r"a\up", r"a\left12"] {
+            assert!(file.chords.iter().any(|chord| {
+                chord.trigger.matches(&Key::parse_sequence(input).unwrap())
+            }));
         }
     }
 
@@ -508,15 +605,21 @@ mod tests {
         assert_eq!(&captures[1], "12.");
         assert_eq!(&captures[2], "reply");
         assert!(regex.is_match("hs.().reply"));
-        assert!(parse_chord_pattern(r"hs.(\(\)).(\d+)")
-            .unwrap()
-            .is_match("hs.().12"));
-        assert!(parse_chord_pattern(r"hs.([]()]+)")
-            .unwrap()
-            .is_match("hs.]()"));
-        assert!(parse_chord_pattern(r"hs.([a-z&&[^aeiou]]+)")
-            .unwrap()
-            .is_match("hs.bcd"));
+        assert!(
+            parse_chord_pattern(r"hs.(\(\)).(\d+)")
+                .unwrap()
+                .is_match("hs.().12")
+        );
+        assert!(
+            parse_chord_pattern(r"hs.([]()]+)")
+                .unwrap()
+                .is_match("hs.]()")
+        );
+        assert!(
+            parse_chord_pattern(r"hs.([a-z&&[^aeiou]]+)")
+                .unwrap()
+                .is_match("hs.bcd")
+        );
     }
 
     #[test]
@@ -550,7 +653,11 @@ name = "Instagram"
                 .find(|chord| chord.raw_trigger == pattern)
                 .unwrap();
             assert!(chord.trigger.matches(&Key::parse_sequence(input).unwrap()));
-            assert!(!chord.trigger.matches(&Key::parse_sequence("hs,12").unwrap()));
+            assert!(
+                !chord
+                    .trigger
+                    .matches(&Key::parse_sequence("hs,12").unwrap())
+            );
             let ChordTrigger::Pattern(regex) = &chord.trigger else {
                 panic!("expected regex");
             };
@@ -679,6 +786,11 @@ mc = { name = "Menu", '@input:menu' = ['by-path', ['Window', 'Columns']] }
             ("?-(a-z)", "-", 26),
             ("?m(0-9)", "m", 10),
             ("?(a-a)", "", 1),
+            (r#"?"0-9""#, "", 10),
+            (r#"?"1-9""#, "", 9),
+            (r#"?m"0-9""#, "m", 10),
+            (r#"?-"a-z""#, "-", 26),
+            (r#"?\up"2-4""#, r"\up", 3),
         ] {
             let hint = ParsedChordsFile::parse_hint(pattern, &Table::new()).unwrap();
             let ChordHintPattern::Range {
@@ -699,7 +811,7 @@ mc = { name = "Menu", '@input:menu' = ['by-path', ['Window', 'Columns']] }
                 count
             );
         }
-        for pattern in ["?-(z-a)", "?-(0-z)"] {
+        for pattern in ["?-(z-a)", "?-(0-z)", r#"?"9-0""#, r#"?m"0-z""#] {
             assert!(ParsedChordsFile::parse_hint(pattern, &Table::new()).is_err());
         }
         assert!(matches!(
@@ -714,6 +826,36 @@ mc = { name = "Menu", '@input:menu' = ['by-path', ['Window', 'Columns']] }
                 .pattern,
             ChordHintPattern::Keys(_)
         ));
+    }
+
+    #[test]
+    fn quoted_help_ranges_in_toml_are_display_only() {
+        let file: ParsedChordsFile = r#"name = 'fixture'
+[chords]
+'?"1-9"' = { name = 'Repeat count' }
+'?m"0-9"' = { name = 'Menu item number' }
+'m(\d+)' = { shell = 'true' }
+"#
+        .parse()
+        .unwrap();
+        assert_eq!(file.chord_hints.len(), 2);
+        assert_eq!(file.chords.len(), 1);
+        for hint in &file.chord_hints {
+            let ChordHintPattern::Range { prefix, keys } = &hint.pattern else {
+                panic!("expected quoted range");
+            };
+            let digits = if prefix.is_empty() {
+                "123456789"
+            } else {
+                "0123456789"
+            };
+            assert_eq!(keys, &Key::parse_sequence(digits).unwrap());
+        }
+        assert!(
+            file.chords[0]
+                .trigger
+                .matches(&Key::parse_sequence("m42").unwrap())
+        );
     }
 
     #[test]

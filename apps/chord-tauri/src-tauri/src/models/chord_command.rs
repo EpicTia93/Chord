@@ -2,6 +2,14 @@ use super::Key;
 use anyhow::{Context, Result};
 use keycode::KeyMappingCode;
 
+pub const CORE_CHORD_PACKAGE: &str = "@keychord/chords-chord";
+pub const CORE_CHORD_REPO: &str = "KeyChord/chords-chord";
+pub const CORE_CHORD_FILE: &str = "chords/com/leonsilicon/chord/macos.toml";
+
+pub fn is_core_chords_file(package: &str, path: &std::path::Path) -> bool {
+    package == CORE_CHORD_PACKAGE && path == std::path::Path::new(CORE_CHORD_FILE)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetaChordCommand {
     Settings,
@@ -20,7 +28,7 @@ pub enum ChordRepeat {
 pub enum ChordCommand {
     Pending,
     /// All input starting with zero belongs to Chord, including unknown commands.
-    Meta(Option<MetaChordCommand>),
+    Meta,
     Run {
         keys: Vec<Key>,
         repeat: ChordRepeat,
@@ -29,20 +37,15 @@ pub enum ChordCommand {
 
 impl ChordCommand {
     pub fn parse(input: &[Key]) -> Result<Self> {
+        // Typed escape notation and physical arrow keys resolve to the same trigger.
+        let sequence = Key::serialize_sequence(input).context("invalid chord sequence")?;
+        let Ok(input) = Key::parse_sequence(&sequence) else {
+            // A backslash belongs to special-key notation, never to a literal chord.
+            // Keep incomplete or unknown escapes editable without dispatching handlers.
+            return Ok(Self::Pending);
+        };
         if input.first() == Some(&Key(KeyMappingCode::Digit0)) {
-            let sequence = Key::serialize_sequence(input).context("invalid meta chord")?;
-            let command = match sequence.as_str() {
-                "0s" => Some(MetaChordCommand::Settings),
-                "0r" => Some(MetaChordCommand::Reload),
-                "0q" => Some(MetaChordCommand::Quit),
-                _ => match sequence.strip_prefix("0h") {
-                    Some(id) if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) => Some(
-                        MetaChordCommand::Halt(id.parse().context("invalid loop ID")?),
-                    ),
-                    _ => None,
-                },
-            };
-            return Ok(Self::Meta(command));
+            return Ok(Self::Meta);
         }
         let prefix_length = input.iter().take_while(|key| key.is_digit()).count();
         if prefix_length == input.len() {
@@ -61,11 +64,8 @@ impl ChordCommand {
                 ChordRepeat::Times(count)
             }
         };
-        // Typed escape notation and physical arrow keys resolve to the same trigger.
-        let sequence =
-            Key::serialize_sequence(&input[prefix_length..]).context("invalid chord sequence")?;
         Ok(Self::Run {
-            keys: Key::parse_sequence(&sequence)?,
+            keys: input[prefix_length..].to_vec(),
             repeat,
         })
     }
@@ -101,18 +101,42 @@ mod tests {
 
     #[test]
     fn zero_always_selects_the_reserved_namespace() {
-        for (input, command) in [
-            ("0s", Some(MetaChordCommand::Settings)),
-            ("0r", Some(MetaChordCommand::Reload)),
-            ("0q", Some(MetaChordCommand::Quit)),
-            ("0h12", Some(MetaChordCommand::Halt(12))),
-            ("0", None),
-            ("0h", None),
-            ("0h12x", None),
-            ("00ab", None),
-        ] {
-            assert_eq!(parse(input).unwrap(), ChordCommand::Meta(command));
+        for input in ["0s", "0r", "0q", "0h12", "0", "0h", "0h12x", "00ab"] {
+            assert_eq!(parse(input).unwrap(), ChordCommand::Meta);
         }
-        assert!(parse("0h4294967296").is_err());
+    }
+
+    #[test]
+    fn typed_special_keys_remain_pending_until_the_escape_is_complete() {
+        for (word, arrow) in [
+            ("up", KeyMappingCode::ArrowUp),
+            ("left", KeyMappingCode::ArrowLeft),
+            ("down", KeyMappingCode::ArrowDown),
+            ("right", KeyMappingCode::ArrowRight),
+        ] {
+            let mut input = Key::parse_sequence("12a").unwrap();
+            input.push(Key(KeyMappingCode::Backslash));
+            for letter in word.chars() {
+                assert_eq!(ChordCommand::parse(&input).unwrap(), ChordCommand::Pending);
+                input.push(letter.to_string().parse().unwrap());
+            }
+            let expected = ChordCommand::Run {
+                keys: vec![Key(KeyMappingCode::KeyA), Key(arrow)],
+                repeat: ChordRepeat::Times(12),
+            };
+            assert_eq!(ChordCommand::parse(&input).unwrap(), expected);
+            let mut physical = Key::parse_sequence("12a").unwrap();
+            physical.push(Key(arrow));
+            assert_eq!(ChordCommand::parse(&physical).unwrap(), expected);
+        }
+        // Former system-action chords and unknown escapes never reach a handler.
+        for prefix in ["", "0", "12a"] {
+            for suffix in ["", "s", "q", "r", "unknown"] {
+                let mut input = Key::parse_sequence(prefix).unwrap();
+                input.push(Key(KeyMappingCode::Backslash));
+                input.extend(Key::parse_sequence(suffix).unwrap());
+                assert_eq!(ChordCommand::parse(&input).unwrap(), ChordCommand::Pending);
+            }
+        }
     }
 }

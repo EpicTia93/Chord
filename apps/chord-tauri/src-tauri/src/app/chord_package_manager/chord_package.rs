@@ -3,7 +3,7 @@ use crate::app::chord_runner::ChordActionTask;
 use crate::models::{
     Chord, ChordAction, ChordEventTrigger, ChordInput, ChordInputEvent, ChordKeyboardEvent,
     ChordTaskAction, ChordTrigger, CompiledChordsFile, FilePathslug, HandlerChordAction, Key,
-    RawChordsFile,
+    RawChordsFile, is_core_chords_file,
 };
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -45,7 +45,7 @@ impl ChordPackage {
         };
         file.chords
             .iter()
-            .filter(|chord| chord.trigger.matches(&event.input))
+            .filter(|chord| chord.trigger.matches_in_namespace(&event.input, is_core_chords_file(&self.name, &pathslug)))
             .map(|chord| ChordReference {
                 package_name: self.name.clone(),
                 chords_file_pathslug: pathslug.clone(),
@@ -57,7 +57,8 @@ impl ChordPackage {
     pub fn matching_global_chords(&self, event: &ChordInputEvent) -> Vec<ChordReference> {
         self.global_chords
             .iter()
-            .filter(|reference| reference.chord.trigger.matches(&event.input))
+            .filter(|reference| reference.chord.trigger.matches_in_namespace(&event.input,
+                is_core_chords_file(&reference.package_name, &reference.chords_file_pathslug)))
             .cloned()
             .collect()
     }
@@ -105,6 +106,9 @@ impl ChordPackage {
         keyboard_event: Option<ChordKeyboardEvent>,
     ) -> Result<Option<ChordActionTask>> {
         Ok(match action {
+            // Core actions execute synchronously in the input manager so a halt
+            // never queues behind the task it must stop.
+            ChordAction::Builtin(_) => None,
             ChordAction::Emit(emit) => {
                 let Some(chords_file) = self
                     .compiled_chords_files
