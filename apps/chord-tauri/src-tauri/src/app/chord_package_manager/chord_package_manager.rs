@@ -763,48 +763,16 @@ impl ChordPackageManager {
 
     /// Gets the chord package that is responsible for handling a specific chord input event
     pub fn create_event_context(&self, event: &ChordInputEvent) -> Option<ChordPackage> {
-        let packages = self.packages.read();
-
-        if let Some(app_id) = &event.application_id {
-            let path = format!("chords/{}/macos.toml", app_id.replace(".", "/"));
-            let path = PathBuf::from(path);
-            for package in packages.values() {
-                if let Some(chords_file) = package.compiled_chords_files.get(&path) {
-                    if chords_file
-                        .chords
-                        .iter()
-                        .find(|c| {
-                            c.trigger.matches(&event.input)
-                                && c.actions
-                                    .iter()
-                                    .any(|a| a.trigger() == ChordEventTrigger::Input)
-                        })
-                        .is_some()
-                    {
-                        return Some(package.clone());
-                    }
-                }
-            }
-        }
-
-        for package in packages.values() {
-            if package
-                .global_chords
-                .iter()
-                .find(|c| {
-                    c.chord.trigger.matches(&event.input)
-                        && c.chord
-                            .actions
-                            .iter()
-                            .any(|a| a.trigger() == ChordEventTrigger::Input)
-                })
-                .is_some()
-            {
-                return Some(package.clone());
-            }
-        }
-
-        None
+        self.matching_chord_contexts(event)
+            .into_iter()
+            .find(|(_, reference)| {
+                reference
+                    .chord
+                    .actions
+                    .iter()
+                    .any(|action| action.trigger() == ChordEventTrigger::Input)
+            })
+            .map(|(package, _)| package)
     }
 
     /// Lifecycle events visit all matching chords, in app/global and package priority order.
@@ -813,29 +781,167 @@ impl ChordPackageManager {
         event: &ChordInputEvent,
     ) -> Vec<(ChordPackage, ChordReference)> {
         let packages = self.packages.read();
-        let mut contexts = Vec::new();
-        let mut seen = HashSet::new();
-        for app_chords in [true, false] {
-            for package in packages.values() {
-                let matches = if app_chords {
-                    package.matching_app_chords(event)
-                } else {
-                    package.matching_global_chords(event)
-                };
-                for reference in matches {
-                    let identity = (
-                        reference.package_name.clone(),
-                        reference.chords_file_pathslug.clone(),
-                        reference.chord.index,
-                        reference.chord.raw_trigger.clone(),
-                    );
-                    if seen.insert(identity) {
-                        contexts.push((package.clone(), reference));
-                    }
+        collect_matching_chord_contexts(
+            packages.values(),
+            event,
+            self.handle.app_state().frontmost().file_picker_active(),
+        )
+    }
+}
+
+fn collect_matching_chord_contexts<'a>(
+    packages: impl IntoIterator<Item = &'a ChordPackage>,
+    event: &ChordInputEvent,
+    file_picker_active: bool,
+) -> Vec<(ChordPackage, ChordReference)> {
+    let packages: Vec<_> = packages.into_iter().collect();
+    let mut scopes = Vec::new();
+    if file_picker_active {
+        scopes.push(Some("com.apple.finder"));
+    }
+    if let Some(app_id) = event.application_id.as_deref() {
+        scopes.push(Some(app_id));
+    }
+    scopes.push(None);
+    let mut contexts = Vec::new();
+    let mut seen = HashSet::new();
+    for scope in scopes {
+        for package in &packages {
+            let matches = match scope {
+                Some(app_id) => package.matching_app_chords_for_id(event, app_id),
+                None => package.matching_global_chords(event),
+            };
+            for reference in matches {
+                let identity = (
+                    reference.package_name.clone(),
+                    reference.chords_file_pathslug.clone(),
+                    reference.chord.index,
+                    reference.chord.raw_trigger.clone(),
+                );
+                if seen.insert(identity) {
+                    contexts.push(((*package).clone(), reference));
                 }
             }
         }
-        contexts
+    }
+    contexts
+}
+
+#[cfg(test)]
+mod file_picker_tests {
+    use super::*;
+    use crate::models::Key;
+
+    fn package(name: &str, app_id: &str, bindings: &str) -> ChordPackage {
+        let parsed: ParsedChordsFile = format!("name = '{name}'\n[chords]\n{bindings}")
+            .parse()
+            .unwrap();
+        let path = PathBuf::from(format!("chords/{}/macos.toml", app_id.replace('.', "/")));
+        let file = CompiledChordsFile {
+            name: parsed.name,
+            pathslug: path.clone(),
+            meta: parsed.meta,
+            chords: parsed.chords,
+            chord_hints: parsed.chord_hints,
+            handlers: vec![],
+        };
+        ChordPackage {
+            name: name.into(),
+            js_package: None,
+            raw_chords_files: HashMap::new(),
+            compiled_chords_files: HashMap::from([(path, file)]),
+            global_chords: vec![],
+        }
+    }
+
+    fn event(input: &str, app: &str) -> ChordInputEvent {
+        ChordInputEvent {
+            input: Key::parse_sequence(input).unwrap(),
+            application_id: Some(app.into()),
+        }
+    }
+
+    #[test]
+    fn picker_precedes_host_app_and_global_even_when_finder_package_is_last() {
+        let mut host = package(
+            "host",
+            "dev.fixture",
+            "gh = { name = 'Host', shortcut = 'cmd+h' }",
+        );
+        let finder = package(
+            "finder",
+            "com.apple.finder",
+            "gh = { name = 'Home', shortcut = 'cmd+shift+h' }",
+        );
+        let mut global = host
+            .matching_app_chords(&event("gh", "dev.fixture"))
+            .remove(0);
+        global.chord.name = "Global".into();
+        global.chords_file_pathslug = PathBuf::from("chords/macos.toml");
+        host.global_chords.push(global);
+        let input = event("gh", "dev.fixture");
+        let matches = collect_matching_chord_contexts([&host, &finder], &input, true);
+        let names: Vec<_> = matches
+            .iter()
+            .map(|(_, reference)| reference.chord.name.as_str())
+            .collect();
+        assert_eq!(names, ["Home", "Host", "Global"]);
+        assert_eq!(input.application_id.as_deref(), Some("dev.fixture"));
+        // The picked shortcut still executes in the real foreground context.
+        let task = matches[0]
+            .0
+            .resolve_task(input, matches[0].1.clone(), 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.event.application_id.as_deref(), Some("dev.fixture"));
+    }
+
+    #[test]
+    fn leaving_picker_restores_host_priority_and_unmatched_picker_chords_fall_back() {
+        let host = package(
+            "host",
+            "dev.fixture",
+            "gh = { name = 'Host', shortcut = 'cmd+h' }\nx = { name = 'Only host', shortcut = 'cmd+x' }",
+        );
+        let finder = package(
+            "finder",
+            "com.apple.finder",
+            "gh = { name = 'Home', shortcut = 'cmd+shift+h' }",
+        );
+        for (input, active, expected) in [("gh", false, "Host"), ("x", true, "Only host")] {
+            let matches = collect_matching_chord_contexts(
+                [&host, &finder],
+                &event(input, "dev.fixture"),
+                active,
+            );
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0].1.chord.name, expected);
+        }
+    }
+
+    #[test]
+    fn actual_finder_does_not_run_a_binding_twice() {
+        let finder = package(
+            "finder",
+            "com.apple.finder",
+            "gh = { name = 'Home', shortcut = 'cmd+shift+h' }",
+        );
+        let matches =
+            collect_matching_chord_contexts([&finder], &event("gh", "com.apple.finder"), true);
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn picker_context_cannot_override_reserved_core_namespace() {
+        // Core-only leading-zero bindings must remain inaccessible to ordinary packages.
+        let finder = package(
+            "finder",
+            "com.apple.finder",
+            "gh = { name = 'Home', shortcut = 'cmd+shift+h' }",
+        );
+        let matches =
+            collect_matching_chord_contexts([&finder], &event("0gh", "dev.fixture"), true);
+        assert!(matches.is_empty());
     }
 }
 

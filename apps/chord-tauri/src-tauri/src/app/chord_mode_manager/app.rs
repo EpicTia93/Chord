@@ -1,8 +1,8 @@
 use crate::app::AppSingleton;
 use crate::app::chord_mode_manager::ChordModeManager;
 use crate::state::{
-    ChordExecutionObservable, ChordInputObservable, ChordPanelObservable, FrontmostObservable,
-    Observable,
+    ChordExecutionObservable, ChordInputObservable, ChordMacrosObservable, ChordPanelObservable,
+    FrontmostObservable, Observable,
 };
 use anyhow::Result;
 use nject::provider;
@@ -20,6 +20,9 @@ pub struct ChordModeManagerProvider {
 
     #[provide(ChordExecutionObservable, |v| v.provide())]
     pub chord_execution_observable: ChordExecutionObservable,
+
+    #[provide(ChordMacrosObservable, |v| v.provide())]
+    pub chord_macros_observable: ChordMacrosObservable,
 
     #[provide(AppHandle, |v| v.clone())]
     pub handle: AppHandle,

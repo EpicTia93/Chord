@@ -436,13 +436,6 @@ impl ParsedChordsFile {
                     core || !chord_value.contains_key("builtin"),
                     "built-in actions are reserved for Chord's protected core file"
                 );
-                if core {
-                    anyhow::ensure!(
-                        key.trim_start_matches('?').starts_with('0'),
-                        "core Chord bindings must use the 0 prefix"
-                    );
-                }
-
                 if key.starts_with('?') {
                     if let Ok(hint) = Self::parse_hint(key, chord_value).inspect_err(|e| {
                         log::warn!("skipping hint {} because of parse error: {}", key, e)
@@ -451,6 +444,12 @@ impl ParsedChordsFile {
                     }
                 } else {
                     if core {
+                        // Display hints also describe repeat counts and global keys.
+                        // Only executable core bindings belong to the 0 namespace.
+                        anyhow::ensure!(
+                            key.starts_with('0'),
+                            "core Chord bindings must use the 0 prefix"
+                        );
                         let chord = Self::parse_chord(key, chord_value, index)?;
                         anyhow::ensure!(
                             chord.actions.len() == 1
@@ -490,6 +489,54 @@ impl ParsedChordsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_hints_can_describe_repeat_counts_and_global_keys() {
+        let file = ParsedChordsFile::parse_core(
+            r#"name = 'fixture'
+[chords]
+'?"1-9"' = { name = 'Repeat count' }
+'?/' = { name = 'Global' }
+'?0' = { name = 'Chord' }
+'0s' = { builtin = { command = 'settings' } }
+"#,
+        )
+        .unwrap();
+        assert_eq!(file.chords.len(), 1);
+        assert_eq!(file.chord_hints.len(), 3);
+        assert!(file.chord_hints.iter().any(|hint| {
+            hint.description == "Repeat count"
+                && matches!(
+                    &hint.pattern,
+                    ChordHintPattern::Range { prefix, keys }
+                        if prefix.is_empty() && keys == &Key::parse_sequence("123456789").unwrap()
+                )
+        }));
+        for (sequence, description) in [("/", "Global"), ("0", "Chord")] {
+            assert!(file.chord_hints.iter().any(|hint| {
+                hint.description == description
+                    && matches!(
+                        &hint.pattern,
+                        ChordHintPattern::Keys(keys) if keys == &Key::parse_sequence(sequence).unwrap()
+                    )
+            }));
+        }
+    }
+
+    #[test]
+    fn core_commands_must_use_the_zero_prefix() {
+        for key in ["s", "1s", "(0)s"] {
+            let source = format!(
+                "name = 'fixture'\n[chords]\n'{key}' = {{ builtin = {{ command = 'settings' }} }}"
+            );
+            let error = ParsedChordsFile::parse_core(&source).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("core Chord bindings must use the 0 prefix")
+            );
+        }
+    }
 
     #[test]
     fn user_definitions_cannot_claim_zero_commands_or_hints() {
@@ -558,9 +605,11 @@ mod tests {
         ));
         assert_eq!(file.chords.len(), 2);
         for input in [r"a\up", r"a\left12"] {
-            assert!(file.chords.iter().any(|chord| {
-                chord.trigger.matches(&Key::parse_sequence(input).unwrap())
-            }));
+            assert!(
+                file.chords
+                    .iter()
+                    .any(|chord| { chord.trigger.matches(&Key::parse_sequence(input).unwrap()) })
+            );
         }
     }
 

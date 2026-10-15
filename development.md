@@ -171,7 +171,34 @@ log status
 Level changes take effect immediately and are persisted as `logLevel` in the development app's
 state store. `RUST_LOG` remains a startup override and takes precedence over the persisted level.
 
+After changing IPC methods, regenerate the frontend bindings without launching
+the app with `cargo test --manifest-path apps/chord-tauri/src-tauri/Cargo.toml --lib export_typescript_bindings -- --ignored`.
+Run `bun run gen-types` after changing observable or model types.
+
 The project tool versions are declared in [`.prototools`](./.prototools). Rust is also pinned in [`rust-toolchain.toml`](./rust-toolchain.toml) because proto delegates Rust version selection to rustup.
+
+## File-picker chord context
+
+Native macOS Open/Save panels temporarily give `com.apple.finder` chords priority
+over the foreground app's chords, followed by global chords. The real app ID is
+preserved for handlers and shortcut delivery, and the chord panel shows the same
+Finder bindings. The Finder package must be installed or loaded from a monorepo.
+
+An Accessibility observer listens for window/sheet creation, focus changes and
+destruction. Workspace activation/lifecycle notifications maintain observers for
+the foreground app and Open/Save panel services. Each event refreshes cached
+context; keyboard dispatch reads that cache without querying Accessibility or
+running a polling timer. Initial attachment also recognizes an already-open panel.
+Revoking Accessibility access releases the observers and clears the context;
+granting it attaches them again.
+
+Detection uses AppKit's nonlocalized `open-panel` / `save-panel` identifiers on
+the focused picker or its containing sheet, so ordinary alerts do not activate
+Finder chords. Custom file browsers without those identifiers are not recognized.
+Finder bindings that explicitly launch or script Finder retain that behavior.
+
+See the [native fixture](apps/chord-tauri/src-tauri/tests/file-picker/README.md)
+for listener validation and `cargo test --lib file_picker_tests` for scope tests.
 
 ## Editing an installed chordpack locally
 

@@ -122,6 +122,7 @@
         "@chord/dev.improve.chord.routes.settings.general.index": "workspace:*",
         "@chord/dev.improve.chord.routes.settings.global-shortcuts.index": "workspace:*",
         "@chord/dev.improve.chord.routes.settings.log.index": "workspace:*",
+        "@chord/dev.improve.chord.routes.settings.macros.index": "workspace:*",
       },
       "devDependencies": {
         "vite-plus": "^1.1.0",
@@ -154,6 +155,7 @@
         "@chord/dev.improve.chord.routes.settings.general.index": "workspace:*",
         "@chord/dev.improve.chord.routes.settings.global-shortcuts.index": "workspace:*",
         "@chord/dev.improve.chord.routes.settings.log.index": "workspace:*",
+        "@chord/dev.improve.chord.routes.settings.macros.index": "workspace:*",
         "@fontsource-variable/geist": "^5.3.0",
         "@headless-tree/core": "^1.7.0",
         "@headless-tree/react": "^1.7.0",
@@ -1132,6 +1134,7 @@
       "devDependencies": {
         "@types/react": "^19.3.0",
         "@types/react-dom": "^19.3.0",
+        "react-dom": "^19.3.0",
       },
     },
     "packages/dev/improve/chord/routes/settings": {
@@ -1581,6 +1584,25 @@
         "@types/react-dom": "^19.3.0",
       },
     },
+    "packages/dev/improve/chord/routes/settings/macros/index": {
+      "name": "@chord/dev.improve.chord.routes.settings.macros.index",
+      "dependencies": {
+        "@chord/com.npmjs.tanstack__react-query": "workspace:*",
+        "@chord/dev.improve.chord.api.taurpc": "workspace:*",
+        "@chord/dev.improve.chord.components.ui.badge": "workspace:*",
+        "@chord/dev.improve.chord.components.ui.button": "workspace:*",
+        "@chord/dev.improve.chord.components.ui.card": "workspace:*",
+        "@chord/dev.improve.chord.components.ui.input": "workspace:*",
+        "@chord/dev.improve.chord.lib.state": "workspace:*",
+        "@chord/dev.improve.chord.lib.typeshare": "workspace:*",
+        "lucide-react": "^1.55.0",
+        "react": "^19.3.0",
+      },
+      "devDependencies": {
+        "@types/react": "^19.3.0",
+        "@types/react-dom": "^19.3.0",
+      },
+    },
   },
   "overrides": {
     "@tanstack/devtools-client": "workspace:packages/com/npmjs/tanstack__devtools-client",
@@ -1895,6 +1917,8 @@
     "@chord/dev.improve.chord.routes.settings.global-shortcuts.index": ["@chord/dev.improve.chord.routes.settings.global-shortcuts.index@workspace:packages/dev/improve/chord/routes/settings/global-shortcuts/index"],
 
     "@chord/dev.improve.chord.routes.settings.log.index": ["@chord/dev.improve.chord.routes.settings.log.index@workspace:packages/dev/improve/chord/routes/settings/log/index"],
+
+    "@chord/dev.improve.chord.routes.settings.macros.index": ["@chord/dev.improve.chord.routes.settings.macros.index@workspace:packages/dev/improve/chord/routes/settings/macros/index"],
 
     "@codemod.com/jssg-types": ["@codemod.com/jssg-types@1.6.3", "", {}, "sha512-b5829ixO5TdGL5xg5YcL9YfiLC3WwFZU+8Zx78NpsHlJ1iySbqfA0g0psqNXv8ss/r7hdpy2KiBXm3GE6bN5bQ=="],
 

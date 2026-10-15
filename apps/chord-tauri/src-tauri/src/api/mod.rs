@@ -5,6 +5,7 @@
 use crate::app::chord_package_manager::LocalChordPackage;
 use crate::app::global_hotkey_store::GlobalShortcutMappingInfo;
 use crate::logging::AppLogEntry;
+use crate::models::ChordMacroName;
 use crate::state::GitRepo;
 use serde::Serialize;
 use specta::Type;
@@ -42,6 +43,12 @@ pub trait Api {
     async fn sync_git_repo(repo: String) -> AppResult<GitRepo>;
     async fn set_git_repo_local_link(repo: String, path: Option<String>) -> AppResult<GitRepo>;
     async fn reload_chords() -> AppResult<()>;
+    async fn set_chord_macro(
+        target: ChordMacroName,
+        sequence: String,
+        previous_target: Option<ChordMacroName>,
+    ) -> AppResult<()>;
+    async fn remove_chord_macro(target: ChordMacroName) -> AppResult<()>;
     async fn list_local_chord_folders() -> AppResult<Vec<String>>;
     async fn pick_local_chord_folder() -> AppResult<Option<String>>;
     async fn add_local_chord_folder(path: String) -> AppResult<LocalChordPackage>;
@@ -71,4 +78,24 @@ pub trait Api {
     async fn get_current_states() -> AppResult<String>;
     async fn get_app_logs() -> AppResult<Vec<AppLogEntry>>;
     async fn run_chord_command(command: String) -> AppResult<ChordCommandOutput>;
+}
+
+#[cfg(test)]
+mod generation {
+    use super::*;
+
+    /// Generate IPC types without starting the desktop app.
+    #[test]
+    #[ignore = "writes generated TypeScript bindings; run explicitly after changing the API"]
+    fn export_typescript_bindings() {
+        taurpc::Exporter::new()
+            .export(
+                &ApiImpl::default().into_handler(),
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../../packages/dev/improve/chord/api/taurpc/bindings.gen.ts"
+                ),
+            )
+            .unwrap();
+    }
 }

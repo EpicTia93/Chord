@@ -15,10 +15,10 @@ use crate::app::{AppHandleExt, AppSingleton};
 use crate::chordpack::load_default_chordpack;
 use crate::lock_file::AppLockFile;
 use crate::state::{
-    AppModeObservable, AppPermissionsObservable, AppSettingsObservable, ChordInputObservable, ChordExecutionObservable,
-    ChordPackageManagerObservable, ChordPackageStoreObservable, ChordPanelObservable,
-    DesktopAppManagerObservable, FrontmostObservable, GitRepo, GitReposObservable,
-    KeyboardObservable, Observable,
+    AppModeObservable, AppPermissionsObservable, AppSettingsObservable, ChordExecutionObservable,
+    ChordInputObservable, ChordMacrosObservable, ChordPackageManagerObservable,
+    ChordPackageStoreObservable, ChordPanelObservable, DesktopAppManagerObservable,
+    FrontmostObservable, GitRepo, GitReposObservable, KeyboardObservable, Observable,
 };
 use crate::tauri_app;
 use anyhow::Result;
@@ -37,6 +37,7 @@ pub fn setup(app: &mut tauri::App) -> Result<()> {
     let app_settings_observable = AppSettingsObservable::new(app)?;
     let chord_input_observable = ChordInputObservable::new(app)?;
     let chord_execution_observable = ChordExecutionObservable::new(app)?;
+    let chord_macros_observable = ChordMacrosObservable::new(app)?;
     let chord_panel_observable = ChordPanelObservable::new(app)?;
     let chord_package_store_observable = ChordPackageStoreObservable::new(app)?;
     let desktop_app_manager_observable = DesktopAppManagerObservable::new(app)?;
@@ -56,6 +57,7 @@ pub fn setup(app: &mut tauri::App) -> Result<()> {
                 handle: handle.clone(),
                 chord_input_observable,
                 chord_execution_observable,
+                chord_macros_observable,
                 chord_panel_observable,
             }
             .provide::<ChordModeManager>(),
@@ -88,7 +90,12 @@ pub fn setup(app: &mut tauri::App) -> Result<()> {
             }
             .provide::<DesktopAppManager>(),
         )
-        .add(DevLockfileDetectorProvider { handle: handle.clone() }.provide::<DevLockfileDetector>())
+        .add(
+            DevLockfileDetectorProvider {
+                handle: handle.clone(),
+            }
+            .provide::<DevLockfileDetector>(),
+        )
         .add(
             AppFrontmostProvider {
                 handle: handle.clone(),

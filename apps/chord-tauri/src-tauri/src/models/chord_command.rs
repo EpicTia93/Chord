@@ -1,4 +1,4 @@
-use super::Key;
+use super::{ChordLayout, ChordMacroName, ChordMacros, Key};
 use anyhow::{Context, Result};
 use keycode::KeyMappingCode;
 
@@ -10,12 +10,18 @@ pub fn is_core_chords_file(package: &str, path: &std::path::Path) -> bool {
     package == CORE_CHORD_PACKAGE && path == std::path::Path::new(CORE_CHORD_FILE)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetaChordCommand {
     Settings,
     Reload,
     Quit,
     Halt(u32),
+    SetLayout(ChordLayout),
+    CycleLayout,
+    SetMacro {
+        name: ChordMacroName,
+        sequence: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +34,9 @@ pub enum ChordRepeat {
 pub enum ChordCommand {
     Pending,
     /// All input starting with zero belongs to Chord, including unknown commands.
-    Meta,
+    Meta {
+        keys: Vec<Key>,
+    },
     Run {
         keys: Vec<Key>,
         repeat: ChordRepeat,
@@ -36,16 +44,22 @@ pub enum ChordCommand {
 }
 
 impl ChordCommand {
-    pub fn parse(input: &[Key]) -> Result<Self> {
+    pub fn parse(input: &[Key], macros: &ChordMacros) -> Result<Self> {
         // Typed escape notation and physical arrow keys resolve to the same trigger.
         let sequence = Key::serialize_sequence(input).context("invalid chord sequence")?;
+        if Key::validate_sequence_escapes(&sequence).is_err() {
+            return Ok(Self::Pending);
+        }
+        let Some(sequence) = macros.expand(&sequence)? else {
+            return Ok(Self::Pending);
+        };
         let Ok(input) = Key::parse_sequence(&sequence) else {
-            // A backslash belongs to special-key notation, never to a literal chord.
+            // A backslash introduces a special key or macro, never a literal chord.
             // Keep incomplete or unknown escapes editable without dispatching handlers.
             return Ok(Self::Pending);
         };
         if input.first() == Some(&Key(KeyMappingCode::Digit0)) {
-            return Ok(Self::Meta);
+            return Ok(Self::Meta { keys: input });
         }
         let prefix_length = input.iter().take_while(|key| key.is_digit()).count();
         if prefix_length == input.len() {
@@ -76,7 +90,7 @@ mod tests {
     use super::*;
 
     fn parse(input: &str) -> Result<ChordCommand> {
-        ChordCommand::parse(&Key::parse_sequence(input)?)
+        ChordCommand::parse(&Key::parse_sequence(input)?, &ChordMacros::default())
     }
 
     #[test]
@@ -102,7 +116,12 @@ mod tests {
     #[test]
     fn zero_always_selects_the_reserved_namespace() {
         for input in ["0s", "0r", "0q", "0h12", "0", "0h", "0h12x", "00ab"] {
-            assert_eq!(parse(input).unwrap(), ChordCommand::Meta);
+            assert_eq!(
+                parse(input).unwrap(),
+                ChordCommand::Meta {
+                    keys: Key::parse_sequence(input).unwrap(),
+                }
+            );
         }
     }
 
@@ -117,17 +136,26 @@ mod tests {
             let mut input = Key::parse_sequence("12a").unwrap();
             input.push(Key(KeyMappingCode::Backslash));
             for letter in word.chars() {
-                assert_eq!(ChordCommand::parse(&input).unwrap(), ChordCommand::Pending);
+                assert_eq!(
+                    ChordCommand::parse(&input, &ChordMacros::default()).unwrap(),
+                    ChordCommand::Pending
+                );
                 input.push(letter.to_string().parse().unwrap());
             }
             let expected = ChordCommand::Run {
                 keys: vec![Key(KeyMappingCode::KeyA), Key(arrow)],
                 repeat: ChordRepeat::Times(12),
             };
-            assert_eq!(ChordCommand::parse(&input).unwrap(), expected);
+            assert_eq!(
+                ChordCommand::parse(&input, &ChordMacros::default()).unwrap(),
+                expected
+            );
             let mut physical = Key::parse_sequence("12a").unwrap();
             physical.push(Key(arrow));
-            assert_eq!(ChordCommand::parse(&physical).unwrap(), expected);
+            assert_eq!(
+                ChordCommand::parse(&physical, &ChordMacros::default()).unwrap(),
+                expected
+            );
         }
         // Former system-action chords and unknown escapes never reach a handler.
         for prefix in ["", "0", "12a"] {
@@ -135,7 +163,10 @@ mod tests {
                 let mut input = Key::parse_sequence(prefix).unwrap();
                 input.push(Key(KeyMappingCode::Backslash));
                 input.extend(Key::parse_sequence(suffix).unwrap());
-                assert_eq!(ChordCommand::parse(&input).unwrap(), ChordCommand::Pending);
+                assert_eq!(
+                    ChordCommand::parse(&input, &ChordMacros::default()).unwrap(),
+                    ChordCommand::Pending
+                );
             }
         }
     }

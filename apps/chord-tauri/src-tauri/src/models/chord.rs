@@ -38,6 +38,21 @@ pub struct Chord {
     pub actions: Vec<ChordAction>,
 }
 
+impl Chord {
+    pub fn description(&self, keys: &[Key]) -> String {
+        if let ChordTrigger::Pattern(pattern) = &self.trigger {
+            if let Some(input) = Key::serialize_sequence(keys) {
+                if let Some(captures) = pattern.captures(&input) {
+                    let mut description = String::new();
+                    captures.expand(&self.name, &mut description);
+                    return description;
+                }
+            }
+        }
+        self.name.clone()
+    }
+}
+
 /// The chord equivalent of `onKeyPress`.
 pub struct ChordPressEvent {
     /// The sequence of keys the user pressed to trigger the chord.

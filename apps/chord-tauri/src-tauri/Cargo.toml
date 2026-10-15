@@ -34,7 +34,6 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-cc = "1.8"
 
 [dependencies]
 tauri = { version = "2", features = [
@@ -100,6 +99,8 @@ objc2-app-kit = { version = "0.3.2", features = [ "block2" ] }
 objc2-foundation = { version = "0.3.2", features = [ "block2" ] }
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"
+objc2-io-kit = { version = "0.3.2", default-features = false, features = ["std", "hid", "hidsystem", "libc"] }
+objc2-application-services = { version = "0.3.2", default-features = false, features = ["std", "AXUIElement", "AXError", "libc"] }
 macos-accessibility-client = "0.0.2"
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1", version = "2.1.0" }
 raw-window-handle = "0.6"

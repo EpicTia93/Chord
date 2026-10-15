@@ -1,8 +1,8 @@
 use anyhow::Result;
+use derive_more::Display;
 use keycode::KeyMappingCode;
 use keycode::KeyMappingCode::*;
 use std::str::FromStr;
-use derive_more::Display;
 use typeshare::typeshare;
 
 const SPECIAL_KEY_SEQUENCES: [(&str, KeyMappingCode); 4] = [
@@ -608,13 +608,18 @@ impl Key {
     }
 
     pub(crate) fn validate_sequence_escapes(sequence: &str) -> Result<()> {
-        for (index, _) in sequence.match_indices('\\') {
-            anyhow::ensure!(
-                SPECIAL_KEY_SEQUENCES
-                    .iter()
-                    .any(|(token, _)| sequence[index..].starts_with(token)),
-                "invalid special-key escape in chord sequence {sequence:?}: backslash must introduce \\up, \\left, \\down, or \\right"
-            );
+        let mut remaining = sequence;
+        while let Some(index) = remaining.find('\\') {
+            remaining = &remaining[index..];
+            let length = SPECIAL_KEY_SEQUENCES
+                .iter()
+                .find(|(token, _)| remaining.starts_with(token))
+                .map(|(token, _)| token.len())
+                .or_else(|| super::parse_macro_reference(remaining).map(|(_, length)| length))
+                .ok_or_else(|| anyhow::anyhow!(
+                    "invalid special-key escape in chord sequence {sequence:?}: expected an arrow key, \\1–\\9, or \\=<name>="
+                ))?;
+            remaining = &remaining[length..];
         }
         Ok(())
     }
@@ -635,11 +640,9 @@ impl Key {
                     .chars()
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("empty sequence"))?;
-                keys.push(
-                    Key::from_str(&c.to_string()).map_err(|_| {
-                        anyhow::anyhow!("Failed to parse chord sequence: {}", sequence)
-                    })?,
-                );
+                keys.push(Key::from_str(&c.to_string()).map_err(|_| {
+                    anyhow::anyhow!("Failed to parse chord sequence: {}", sequence)
+                })?);
                 remaining = &remaining[c.len_utf8()..];
             }
         }
@@ -656,17 +659,23 @@ mod sequence_tests {
     fn arrow_escapes_round_trip_and_combine_with_ordinary_keys() {
         let sequence = r"a\up\left\down\rightb";
         let keys = Key::parse_sequence(sequence).unwrap();
-        assert_eq!(keys, [
-            Key(KeyA), Key(ArrowUp), Key(ArrowLeft), Key(ArrowDown), Key(ArrowRight), Key(KeyB),
-        ]);
+        assert_eq!(
+            keys,
+            [
+                Key(KeyA),
+                Key(ArrowUp),
+                Key(ArrowLeft),
+                Key(ArrowDown),
+                Key(ArrowRight),
+                Key(KeyB),
+            ]
+        );
         assert_eq!(Key::serialize_sequence(&keys).as_deref(), Some(sequence));
     }
 
     #[test]
     fn backslash_is_reserved_for_special_key_escapes() {
-        for sequence in [
-            r"\", r"a\", r"\u", r"\s", r"\unknown", r"a\\up", r"a\up\q",
-        ] {
+        for sequence in [r"\", r"a\", r"\u", r"\s", r"\unknown", r"a\\up", r"a\up\q"] {
             let error = Key::parse_sequence(sequence).unwrap_err();
             assert!(
                 error.to_string().contains("invalid special-key escape"),

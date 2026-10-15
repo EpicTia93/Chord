@@ -1,10 +1,11 @@
 import type { Chord, ChordHint, ChordReference } from '@chord/dev.improve.chord.lib.typeshare';
 import { cn } from '@chord/com.npmjs.utils-cn';
 import { Kbd } from '@chord/dev.improve.chord.components.ui.kbd';
-import { StateQueries, useChordExecutionState, useChordInputState, useChordPackageManagerState, useChordPanelState, useFrontmostState, useKeyboardState } from '@chord/dev.improve.chord.lib.state';
+import { StateQueries, useChordExecutionState, useChordInputState, useChordMacrosState, useChordPackageManagerState, useChordPanelState, useFrontmostState, useKeyboardState } from '@chord/dev.improve.chord.lib.state';
 import { emit, listen } from '@tauri-apps/api/event';
 import { getRangeHint, getRepeatPrefixTokens, normalizeChordTokens, normalizeToken } from '#chord-tokens';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { getEscapeSuggestions } from '#chord-suggestions';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 const LETTER_TOKENS = Array.from({ length: 26 }, (_, index) =>
 	String.fromCharCode('A'.charCodeAt(0) + index));
@@ -12,6 +13,23 @@ const MAX_KEY_SIZE = 32;
 const NATIVE_SURFACE_RADIUS = 32;
 const SHOW_DEVELOPMENT_LABEL = import.meta.env.DEV;
 const SINGLE_LETTER_TOKEN_REGEX = /^[A-Z]$/;
+const MAX_ESCAPE_SUGGESTIONS = 10;
+
+function ChordEscapeSuggestions({ result }: { result: NonNullable<ReturnType<typeof getEscapeSuggestions>> }) {
+	const visible = result.suggestions.slice(0, MAX_ESCAPE_SUGGESTIONS);
+	return (
+		<div className="w-full min-w-72 max-w-lg border-t border-foreground/10 pt-3 text-left" aria-live="polite">
+			<p className="mb-2 text-xs font-medium text-foreground/60">Suggestions</p>
+			{visible.length > 0 ? <ul aria-label="Escape suggestions" className="space-y-2">
+				{visible.map(suggestion => <li key={suggestion.reference} className="flex min-w-0 items-baseline gap-3 text-sm">
+					<code className="max-w-64 shrink-0 truncate rounded-md border border-border/70 bg-background/80 px-2 py-0.5" title={suggestion.reference}>{suggestion.reference}</code>
+					<span className={cn('min-w-0 truncate text-foreground/75', suggestion.kind === 'macro' && 'font-mono')} title={suggestion.description}>{suggestion.description}</span>
+				</li>)}
+			</ul> : <p className="text-sm text-foreground/60">No matching macros or special keys.</p>}
+			{result.suggestions.length > visible.length && <p className="mt-2 text-xs text-foreground/60">{result.suggestions.length - visible.length} more · Keep typing to narrow the list</p>}
+		</div>
+	);
+}
 
 function clamp(value: number, min: number, max: number) {
 	return Math.min(Math.max(value, min), max);
@@ -73,21 +91,22 @@ function ChordKeyRow({
 
 export function ChordsPage() {
 	return (
-		<StateQueries queries={[useChordInputState(), useChordPanelState(), useKeyboardState(), useFrontmostState(), useChordPackageManagerState(), useChordExecutionState()]} quiet>
-			{(chordInputData, chordPanelData, keyboardData, frontmostData, chordPackageManagerData, chordExecutionData) => (
-				<ChordsPageContent chordInputData={chordInputData} chordPanelData={chordPanelData} keyboardData={keyboardData} frontmostData={frontmostData} chordPackageManagerData={chordPackageManagerData} chordExecutionData={chordExecutionData} />
+		<StateQueries queries={[useChordInputState(), useChordPanelState(), useKeyboardState(), useFrontmostState(), useChordPackageManagerState(), useChordExecutionState(), useChordMacrosState()]} quiet>
+			{(chordInputData, chordPanelData, keyboardData, frontmostData, chordPackageManagerData, chordExecutionData, chordMacrosData) => (
+				<ChordsPageContent chordInputData={chordInputData} chordPanelData={chordPanelData} keyboardData={keyboardData} frontmostData={frontmostData} chordPackageManagerData={chordPackageManagerData} chordExecutionData={chordExecutionData} chordMacrosData={chordMacrosData} />
 			)}
 		</StateQueries>
 	);
 }
 
-function ChordsPageContent({
+export function ChordsPageContent({
 	chordInputData,
 	chordPanelData,
 	keyboardData,
 	frontmostData,
 	chordPackageManagerData,
 	chordExecutionData,
+	chordMacrosData,
 }: {
 	chordInputData: NonNullable<ReturnType<typeof useChordInputState>['data']>
 	chordPanelData: NonNullable<ReturnType<typeof useChordPanelState>['data']>
@@ -95,19 +114,22 @@ function ChordsPageContent({
 	frontmostData: NonNullable<ReturnType<typeof useFrontmostState>['data']>
 	chordPackageManagerData: NonNullable<ReturnType<typeof useChordPackageManagerState>['data']>
 	chordExecutionData: NonNullable<ReturnType<typeof useChordExecutionState>['data']>
+	chordMacrosData: NonNullable<ReturnType<typeof useChordMacrosState>['data']>
 }) {
 	const chordInputState = chordInputData;
 	const chordPanelState = chordPanelData;
 	const keyboardState = keyboardData;
-	const { frontmostAppBundleId } = frontmostData;
+	const { frontmostAppBundleId, filePickerActive } = frontmostData;
 	const { packages } = chordPackageManagerData;
 	const { loops, metaCommands, haltLoopTemplate } = chordExecutionData;
+	const isFloating = chordPanelState.layout === 'floating-bottom';
 
 	const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
 	const [surfaceVersion, setSurfaceVersion] = useState(0);
 	const surfaceRef = useRef<HTMLDivElement>(null);
+	const floatingKeysRef = useRef<HTMLDivElement>(null);
 
-	const emitSurfaceRect = () => {
+	const emitSurfaceRect = useCallback(() => {
 		const surface = surfaceRef.current;
 		if (!surface) {
 			return;
@@ -119,9 +141,10 @@ function ChordsPageContent({
 			y: window.innerHeight - rect.bottom,
 			width: rect.width,
 			height: rect.height,
-			radius: NATIVE_SURFACE_RADIUS,
+			radius: isFloating ? 16 : NATIVE_SURFACE_RADIUS,
+			flushLeft: !isFloating,
 		});
-	};
+	}, [isFloating]);
 
 	useEffect(() => {
 		const handleResize = () => {
@@ -155,7 +178,7 @@ function ChordsPageContent({
 
 		emitSurfaceRect();
 		void emit('chorder-surface-ready');
-	}, [surfaceVersion]);
+	}, [surfaceVersion, emitSurfaceRect]);
 
 	useEffect(() => {
 		const surface = surfaceRef.current;
@@ -171,9 +194,11 @@ function ChordsPageContent({
 		return () => {
 			observer.disconnect();
 		};
-	}, [surfaceVersion]);
+	}, [surfaceVersion, emitSurfaceRect]);
 
 	const activeAppChords: Chord[] = [];
+	const finderChords: Chord[] = [];
+	const finderHints: ChordHint[] = [];
 	const hintsByRawPattern: Record<string, ChordHint> = {};
 	const globalChords: ChordReference[] = [];
 	const repeatCountHints = new Set<ChordHint>();
@@ -196,7 +221,12 @@ function ChordsPageContent({
 				}
 			}
 
-			if (bundleId === frontmostAppBundleId) {
+			if (filePickerActive && bundleId === 'com.apple.finder') {
+				finderChords.push(...file.chords);
+				finderHints.push(...file.chordHints);
+			}
+
+			if (bundleId === frontmostAppBundleId && !(filePickerActive && bundleId === 'com.apple.finder')) {
 				for (const hint of file.chordHints) {
 					hintsByRawPattern[hint.rawPattern] = hint;
 				}
@@ -208,7 +238,11 @@ function ChordsPageContent({
 		}
 	}
 
-	const activeChords: Chord[] = [...activeAppChords, ...globalChords.map(c => c.chord)];
+	// The native resolver visits the picker scope before app and global scopes.
+	for (const hint of finderHints.toReversed()) {
+		hintsByRawPattern[hint.rawPattern] = hint;
+	}
+	const activeChords: Chord[] = [...finderChords, ...activeAppChords, ...globalChords.map(c => c.chord)];
 	const baseHintSequences = Object.values(hintsByRawPattern).flatMap(hint =>
 		'keys' in hint.pattern
 			? [{ tokens: hint.pattern.keys.map(normalizeToken), description: hint.description }]
@@ -231,6 +265,7 @@ function ChordsPageContent({
 	);
 
 	const normalizedBufferTokens = normalizeChordTokens(chordInputState.input);
+	const escapeSuggestions = getEscapeSuggestions(normalizedBufferTokens, chordMacrosData.entries);
 	const normalizedActiveChordTokens = normalizeChordTokens(chordInputState.selectedInputEvent?.input ?? []);
 
 	const shouldHighlightActiveChord
@@ -240,6 +275,9 @@ function ChordsPageContent({
 	const selectedTokens = shouldHighlightActiveChord
 		? normalizedActiveChordTokens
 		: normalizedBufferTokens;
+	const floatingTokens = normalizedBufferTokens.length > 0
+		? normalizedBufferTokens
+		: normalizedActiveChordTokens;
 	const currentPrefixLength = selectedTokens.length;
 	const repeatPrefixTokens = getRepeatPrefixTokens(selectedTokens);
 	const builtinHints = [
@@ -252,6 +290,12 @@ function ChordsPageContent({
 		...(repeatPrefixTokens.length === 0 ? [{ tokens: ['1'], description: 'Loop chord' }] : []),
 	];
 	const rangeHints = baseRangeHints.map(hint => getRangeHint(hint, repeatPrefixTokens));
+	const floatingHint = hintSequences.findLast(hint =>
+		hint.tokens.length === floatingTokens.length
+		&& hint.tokens.every((token, index) => floatingTokens[index] === token));
+	const floatingDescription = chordInputState.description
+		?? floatingHint?.description
+		?? (floatingTokens.length > 0 ? '...' : 'Ready for a chord');
 
 	const maxVisibleRows = 20;
 	const availableHeight = Math.max(viewportHeight - 96, 240);
@@ -347,25 +391,63 @@ function ChordsPageContent({
 
 	useLayoutEffect(() => {
 		emitSurfaceRect();
-	}, [currentPrefixLength, keyColumns.length, keySize, rowGap, descriptionFontSize, chordPanelState.isVisible]);
+	}, [currentPrefixLength, keyColumns.length, keySize, rowGap, descriptionFontSize, chordPanelState.isVisible, emitSurfaceRect]);
+
+	useLayoutEffect(() => {
+		const keys = floatingKeysRef.current;
+		if (keys) {
+			keys.scrollLeft = keys.scrollWidth;
+		}
+	}, [chordInputState.input, chordInputState.selectedInputEvent, isFloating]);
 
 	return (
 		<div className="relative size-full bg-transparent">
-			<div className="absolute left-0 top-1/2 -translate-y-1/2">
+			<div className={isFloating ? 'absolute bottom-3 left-1/2 w-max min-w-40 max-w-[calc(100%_-_1.5rem)] -translate-x-1/2' : 'absolute left-0 top-1/2 -translate-y-1/2'}>
 				<div
 					key={surfaceVersion}
 					ref={surfaceRef}
 					className={cn(
-						'relative isolate overflow-hidden rounded-r-[2rem] rounded-l-none border border-l-0 px-5 py-5 pl-7',
-						'border-white/30 bg-white/22 shadow-[18px_20px_60px_rgba(15,23,42,0.18),inset_0_1px_0_rgba(255,255,255,0.42)]',
-						'dark:border-white/10 dark:bg-zinc-950/24 dark:shadow-[18px_20px_60px_rgba(0,0,0,0.34),inset_0_1px_0_rgba(255,255,255,0.1)]',
+						'relative isolate overflow-hidden border border-white/30 bg-white/22 dark:border-white/10 dark:bg-zinc-950/24',
+						isFloating
+							? 'rounded-2xl px-3 py-2.5 shadow-[0_4px_12px_rgba(15,23,42,0.18)] dark:shadow-[0_4px_12px_rgba(0,0,0,0.34)]'
+							: 'rounded-r-[2rem] rounded-l-none border-l-0 px-5 py-5 pl-7 shadow-[18px_20px_60px_rgba(15,23,42,0.18),inset_0_1px_0_rgba(255,255,255,0.42)] dark:shadow-[18px_20px_60px_rgba(0,0,0,0.34),inset_0_1px_0_rgba(255,255,255,0.1)]',
 					)}
 					style={{
 						// Move the native vibrancy surface offscreen too when toggled off.
-						transform: chordPanelState.isVisible ? undefined : 'translateX(calc(-100% - 40px))',
+						transform: chordPanelState.isVisible ? undefined : isFloating ? 'translateY(calc(100% + 40px))' : 'translateX(calc(-100% - 40px))',
 						opacity: chordPanelState.isVisible ? 1 : 0,
 					}}
 				>
+					{isFloating || escapeSuggestions ? (
+						<div className="flex flex-col items-center gap-1.5" aria-live="polite">
+							<div ref={floatingKeysRef} className="w-full overflow-x-hidden py-0.5">
+								<div className="mx-auto flex w-max min-w-full justify-center gap-1.5">
+									{floatingTokens.length > 0 ? floatingTokens.map((token, index) => (
+										<Kbd
+											key={`${index}-${token}`}
+											className={cn(
+												'h-7 min-w-7 shrink-0 rounded-md border px-1.5 font-mono text-sm shadow-sm',
+												normalizedBufferTokens.length === 0
+													? 'border-emerald-400/90 bg-emerald-100 text-emerald-950'
+													: 'border-border/80 bg-background/95 text-foreground',
+											)}
+										>
+										{token}
+										</Kbd>
+								)) : (
+									<Kbd
+										aria-label="No key pressed"
+										className="h-7 min-w-7 shrink-0 rounded-md border border-border/80 bg-background/95 px-1.5 font-mono text-sm text-foreground shadow-sm"
+									/>
+								)}
+								</div>
+							</div>
+							<div className="line-clamp-2 w-full text-center text-xs leading-4 text-foreground/90">
+								{floatingDescription}
+							</div>
+							{escapeSuggestions && <ChordEscapeSuggestions result={escapeSuggestions} />}
+						</div>
+					) : <>
 						{repeatPrefixTokens.length > 0 && (
 							<div className="mb-3 text-xs text-foreground/70">
 								{Number(repeatPrefixTokens.join('')) === 1 ? 'Loop chord' : `Repeat ${repeatPrefixTokens.join('')} times`}
@@ -408,6 +490,7 @@ function ChordsPageContent({
 							))}
 						</div>
 					</div>
+					</>}
 				</div>
 			</div>
 		</div>

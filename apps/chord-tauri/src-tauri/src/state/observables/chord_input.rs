@@ -16,6 +16,9 @@ pub struct ChordInputState {
 
     /// The chord that is "active"
     pub selected_input_event: Option<ChordInputEvent>,
+
+    /// Resolved action name for the current buffer or the last executed chord.
+    pub description: Option<String>,
 }
 
 define_observable!(

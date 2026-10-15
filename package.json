@@ -133,7 +133,8 @@
     "@chord/dev.improve.chord.routes.settings.general.index": "workspace:*",
     "@chord/dev.improve.chord.routes.settings.global-shortcuts.index": "workspace:*",
     "@chord/dev.improve.chord.routes.settings.log.index": "workspace:*",
-    "@chord/dev.improve.chord.lib.typeshare": "workspace:*"
+    "@chord/dev.improve.chord.lib.typeshare": "workspace:*",
+    "@chord/dev.improve.chord.routes.settings.macros.index": "workspace:*"
   },
   "devDependencies": {
     "vite-plus": "^1.1.0"

@@ -51,6 +51,7 @@ impl AppFrontmost {
             if let Some(bundle_id) = application.bundleIdentifier() {
                 self.observable.set_state(|_| FrontmostState {
                     frontmost_app_bundle_id: Some(bundle_id.to_string()),
+                    ..Default::default()
                 })?;
             }
         }
@@ -63,6 +64,9 @@ impl AppFrontmost {
             handle: self.handle.clone(),
         }));
 
+        #[cfg(target_os = "macos")]
+        super::file_picker::init(self.handle.clone())?;
+
         Ok(())
     }
 
@@ -71,8 +75,27 @@ impl AppFrontmost {
     }
 
     pub(super) fn set_frontmost(&self, app_id: Option<String>) -> Result<()> {
-        self.observable.set_state(|_| FrontmostState {
+        self.observable.set_state(|previous| FrontmostState {
+            file_picker_active: previous.file_picker_active
+                && previous.frontmost_app_bundle_id == app_id,
             frontmost_app_bundle_id: app_id,
+        })
+    }
+
+    pub fn file_picker_active(&self) -> bool {
+        self.observable
+            .get_state()
+            .is_ok_and(|state| state.file_picker_active)
+    }
+
+    pub(super) fn set_file_picker_active(&self, active: bool) -> Result<()> {
+        if self.file_picker_active() == active {
+            return Ok(());
+        }
+        log::debug!("File picker context: {active}");
+        self.observable.set_state(|state| FrontmostState {
+            file_picker_active: active,
+            ..state
         })
     }
 }

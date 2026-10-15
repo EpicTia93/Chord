@@ -1,4 +1,6 @@
 use crate::IndicatorPanel;
+use crate::models::ChordLayout;
+use crate::startup::APP_STATE_STORE_PATH;
 use crate::state::{ChordPanelObservable, ChordPanelState, Observable};
 use anyhow::{Result, ensure};
 use arc_swap::ArcSwap;
@@ -15,9 +17,14 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Listener, Manager, WebviewUrl, WebviewWindow, Wry};
 use tauri_nspanel::{CollectionBehavior, PanelBuilder, PanelHandle, PanelLevel, StyleMask};
+use tauri_plugin_store::StoreExt;
 use window_vibrancy::NSVisualEffectViewTagged;
 
 const INDICATOR_WIDTH: u32 = 640;
+const FLOATING_WIDTH: f64 = 480.0;
+const FLOATING_HEIGHT: f64 = 120.0;
+const FLOATING_BOTTOM_MARGIN: f64 = 24.0;
+const LAYOUT_STORE_KEY: &str = "chordLayout";
 const NATIVE_SURFACE_TAG: NSInteger = 91376255;
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -28,6 +35,7 @@ pub struct NativeSurfaceRect {
     pub width: f64,
     pub height: f64,
     pub radius: f64,
+    pub flush_left: bool,
 }
 
 #[injectable]
@@ -64,6 +72,10 @@ impl ChordModePanel {
             !native_panel.isKeyWindow() && !native_panel.isMainWindow(),
             "chord-mode panel unexpectedly became key or main"
         );
+        ensure!(
+            native_panel.ignoresMouseEvents() && !native_panel.acceptsMouseMovedEvents(),
+            "chord-mode panel must pass all mouse events through to underlying windows"
+        );
         Ok(())
     }
 
@@ -84,6 +96,14 @@ impl ChordModePanel {
     }
 
     pub fn init(&self) -> Result<()> {
+        let store = self.handle.store(APP_STATE_STORE_PATH)?;
+        let layout = store
+            .get(LAYOUT_STORE_KEY)
+            .map(serde_json::from_value)
+            .transpose()?
+            .unwrap_or_default();
+        self.observable
+            .set_state(|prev| ChordPanelState { layout, ..prev })?;
         self.get_or_create_window()?;
         let panel = self.panel.load_full();
         let panel = panel
@@ -118,6 +138,72 @@ impl ChordModePanel {
         );
         Self::ensure_nonactivating(panel)?;
         Ok(())
+    }
+
+    pub fn set_layout(&self, layout: ChordLayout) -> Result<()> {
+        let store = self.handle.store(APP_STATE_STORE_PATH)?;
+        let previous = store.get(LAYOUT_STORE_KEY);
+        store.set(LAYOUT_STORE_KEY, serde_json::to_value(layout)?);
+        if let Err(error) = store.save() {
+            if let Some(previous) = previous {
+                store.set(LAYOUT_STORE_KEY, previous);
+            } else {
+                store.delete(LAYOUT_STORE_KEY);
+            }
+            return Err(error.into());
+        }
+        self.observable
+            .set_state(|prev| ChordPanelState { layout, ..prev })?;
+        let panel = self.panel.load_full();
+        self.run_on_main_thread_sync(move || {
+            if let Some(panel) = panel.as_ref() {
+                Self::position_panel(panel, layout);
+            }
+            Ok(())
+        })?;
+        self.emit_will_show()
+    }
+
+    pub fn cycle_layout(&self) -> Result<()> {
+        self.set_layout(self.observable.get_state()?.layout.next())
+    }
+
+    fn frame_for_layout(layout: ChordLayout, visible_frame: NSRect) -> NSRect {
+        let width = match layout {
+            ChordLayout::SidebarLeft => INDICATOR_WIDTH as f64,
+            ChordLayout::FloatingBottom => FLOATING_WIDTH,
+        }
+        .min(visible_frame.size.width);
+        match layout {
+            ChordLayout::SidebarLeft => NSRect::new(
+                visible_frame.origin,
+                NSSize::new(width, visible_frame.size.height),
+            ),
+            ChordLayout::FloatingBottom => {
+                let height = FLOATING_HEIGHT.min(visible_frame.size.height);
+                let margin = FLOATING_BOTTOM_MARGIN.min(visible_frame.size.height - height);
+                NSRect::new(
+                    NSPoint::new(
+                        visible_frame.origin.x + (visible_frame.size.width - width) / 2.0,
+                        visible_frame.origin.y + margin,
+                    ),
+                    NSSize::new(width, height),
+                )
+            }
+        }
+    }
+
+    fn position_panel(panel: &PanelHandle<Wry>, layout: ChordLayout) {
+        let native_panel = panel.as_panel();
+        // Keep the native window out of mouse hit testing after layout changes
+        // and before every show, including its transparent webview and vibrancy.
+        native_panel.setIgnoresMouseEvents(true);
+        native_panel.setAcceptsMouseMovedEvents(false);
+        if let Some(screen) = native_panel.screen() {
+            let frame = Self::frame_for_layout(layout, screen.visibleFrame());
+            native_panel.setContentSize(frame.size);
+            native_panel.setFrameOrigin(frame.origin);
+        }
     }
 
     fn emit_will_show(&self) -> Result<()> {
@@ -165,6 +251,9 @@ impl ChordModePanel {
             .url(WebviewUrl::App("index.html".into()))
             .title("Chords")
             .no_activate(true)
+            .ignores_mouse_events(true)
+            .accepts_mouse_moved_events(false)
+            .movable_by_window_background(false)
             .style_mask(Self::nonactivating_style_mask())
             .with_window(|window| {
                 window
@@ -231,9 +320,11 @@ impl ChordModePanel {
                 existing_view.removeFromSuperview();
             }
 
+            // Only the edge-attached sidebar extends past its left corners.
+            let left_extension = if rect.flush_left { rect.radius } else { 0.0 };
             let frame = NSRect::new(
-                NSPoint::new(rect.x - rect.radius, rect.y),
-                NSSize::new(rect.width + rect.radius, rect.height),
+                NSPoint::new(rect.x - left_extension, rect.y),
+                NSSize::new(rect.width + left_extension, rect.height),
             );
             let vibrancy_view = NSVisualEffectViewTagged::initWithFrame(
                 // Guaranteed by `run_on_main_thread`.
@@ -260,26 +351,15 @@ impl ChordModePanel {
 
     fn show(&self) -> Result<()> {
         let panel = self.panel.load_full();
+        let layout = self.observable.get_state()?.layout;
 
         self.run_on_main_thread_sync(move || {
             let panel = panel
                 .as_ref()
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("chord-mode panel was not initialized"))?;
+            Self::position_panel(panel, layout);
             Self::ensure_nonactivating(panel)?;
-
-            let native_panel = panel.as_panel();
-            if let Some(screen) = native_panel.screen() {
-                let visible_frame = screen.visibleFrame();
-                native_panel.setContentSize(tauri_nspanel::objc2_foundation::NSSize::new(
-                    INDICATOR_WIDTH as f64,
-                    visible_frame.size.height,
-                ));
-
-                let x = visible_frame.origin.x;
-                let y = visible_frame.origin.y;
-                native_panel.setFrameOrigin(tauri_nspanel::objc2_foundation::NSPoint::new(x, y));
-            }
 
             panel.set_alpha_value(0.0);
             let _ = panel.make_first_responder(None);
@@ -351,6 +431,23 @@ impl ChordModePanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layouts_follow_the_displays_visible_frame_including_negative_origins() {
+        let screen = NSRect::new(NSPoint::new(-1600.0, 80.0), NSSize::new(1440.0, 900.0));
+        assert_eq!(
+            ChordModePanel::frame_for_layout(ChordLayout::SidebarLeft, screen),
+            NSRect::new(NSPoint::new(-1600.0, 80.0), NSSize::new(640.0, 900.0))
+        );
+        assert_eq!(
+            ChordModePanel::frame_for_layout(ChordLayout::FloatingBottom, screen),
+            NSRect::new(NSPoint::new(-1120.0, 104.0), NSSize::new(480.0, 120.0))
+        );
+        let small = NSRect::new(NSPoint::new(0.0, -100.0), NSSize::new(320.0, 100.0));
+        for layout in [ChordLayout::SidebarLeft, ChordLayout::FloatingBottom] {
+            assert_eq!(ChordModePanel::frame_for_layout(layout, small), small);
+        }
+    }
 
     #[test]
     fn chord_mode_style_is_borderless_and_nonactivating() {

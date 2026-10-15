@@ -31,6 +31,10 @@ export enum BuiltinChordKind {
 	Reload = "reload",
 	Quit = "quit",
 	HaltLoop = "halt-loop",
+	SetBuffer = "set-buffer",
+	SetMacro = "set-macro",
+	SetLayout = "set-layout",
+	CycleLayout = "cycle-layout",
 }
 
 export interface BuiltinChordAction {
@@ -112,6 +116,8 @@ export interface ChordInputState {
 	pressedInputEvent?: ChordInputEvent;
 	/** The chord that is "active" */
 	selectedInputEvent?: ChordInputEvent;
+	/** Resolved action name for the current buffer or the last executed chord. */
+	description?: string;
 }
 
 export interface ChordJsPackage {
@@ -132,6 +138,20 @@ export interface ChordKeyboardEvent {
 	repeat: boolean;
 	isComposing: boolean;
 	timeStamp: number;
+}
+
+export type ChordMacroName = 
+	| { type: "buffer", value: number }
+	| { type: "named", value: string };
+
+export interface ChordMacroEntry {
+	target: ChordMacroName;
+	sequence: string;
+	persistent: boolean;
+}
+
+export interface ChordMacrosState {
+	entries: ChordMacroEntry[];
 }
 
 /**
@@ -205,8 +225,14 @@ export interface ChordPackageStoreState {
 	entries: Record<string, ChordPackageStoreEntry>;
 }
 
+export enum ChordLayout {
+	SidebarLeft = "sidebar-left",
+	FloatingBottom = "floating-bottom",
+}
+
 export interface ChordPanelState {
 	isVisible: boolean;
+	layout: ChordLayout;
 }
 
 export interface DesktopAppMetadata {
@@ -237,6 +263,7 @@ export interface EmitChordAction {
 
 export interface FrontmostState {
 	frontmostAppBundleId?: string;
+	filePickerActive: boolean;
 }
 
 export interface GitRepo {

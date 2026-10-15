@@ -3,6 +3,7 @@
 	"type": "module",
 	"private": true,
 	"imports": {
+		"#chord-suggestions": "./chord-suggestions.ts",
 		"#chord-tokens": "./chord-tokens.ts",
 		"#chords-page": "./chords-page.tsx"
 	},
@@ -19,6 +20,7 @@
 		"react": "^19.3.0"
 	},
 	"devDependencies": {
+		"react-dom": "^19.3.0",
 		"@types/react": "^19.3.0",
 		"@types/react-dom": "^19.3.0"
 	}

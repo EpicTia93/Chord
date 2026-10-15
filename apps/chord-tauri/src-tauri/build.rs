@@ -6,15 +6,7 @@ fn main() {
         "cargo:rustc-env=CHORD_TARGET_TRIPLE={}",
         std::env::var("TARGET").expect("cargo sets TARGET")
     );
-    println!("cargo:rerun-if-changed=native/hid.c");
-    println!("cargo:rerun-if-changed=native/hid.h");
-    println!("cargo:rerun-if-changed=native/caps.c");
     println!("cargo:rerun-if-changed=../data/*");
-
-    cc::Build::new()
-        .file("native/hid.c")
-        .file("native/caps.c")
-        .compile("hid_caps");
 
     // rbun links `libbun_embed.dylib` dynamically. Dev builds find it where
     // the rbun checkout built it; the app bundle ships it in

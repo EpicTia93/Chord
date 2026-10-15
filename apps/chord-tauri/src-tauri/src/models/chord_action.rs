@@ -1,4 +1,7 @@
-use super::{ChordKeyboardEvent, ChordTrigger, Key, MetaChordCommand, SimulatedShortcut};
+use super::{
+    ChordKeyboardEvent, ChordLayout, ChordMacroName, ChordTrigger, Key, MetaChordCommand,
+    SimulatedShortcut,
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use typeshare::typeshare;
@@ -43,6 +46,10 @@ pub enum BuiltinChordKind {
     Reload,
     Quit,
     HaltLoop,
+    SetBuffer,
+    SetMacro,
+    SetLayout,
+    CycleLayout,
 }
 
 #[typeshare]
@@ -59,34 +66,70 @@ impl BuiltinChordAction {
             BuiltinChordKind::Settings => MetaChordCommand::Settings,
             BuiltinChordKind::Reload => MetaChordCommand::Reload,
             BuiltinChordKind::Quit => MetaChordCommand::Quit,
+            BuiltinChordKind::SetLayout => {
+                let argument = self.resolve_argument(trigger, keys)?;
+                let layout = serde_json::from_value::<ChordLayout>(argument.into())
+                    .context("invalid chord layout")?;
+                MetaChordCommand::SetLayout(layout)
+            }
+            BuiltinChordKind::CycleLayout => MetaChordCommand::CycleLayout,
             BuiltinChordKind::HaltLoop => {
-                let argument = self
-                    .argument
-                    .as_deref()
-                    .context("halt-loop requires an argument")?;
-                let input = Key::serialize_sequence(keys).context("invalid meta chord")?;
-                let value = if let Some(capture) = argument.strip_prefix('$') {
-                    let ChordTrigger::Pattern(pattern) = trigger else {
-                        anyhow::bail!("halt-loop capture requires a regex trigger");
-                    };
-                    let captures = pattern
-                        .captures(&input)
-                        .context("meta chord did not match")?;
-                    captures
-                        .get(
-                            capture
-                                .parse::<usize>()
-                                .context("invalid loop ID capture")?,
-                        )
-                        .context("loop ID capture not found")?
-                        .as_str()
-                        .to_owned()
-                } else {
-                    argument.to_owned()
-                };
+                let value = self.resolve_argument(trigger, keys)?;
                 MetaChordCommand::Halt(value.parse().context("invalid loop ID")?)
             }
+            BuiltinChordKind::SetBuffer => {
+                let value = self.resolve_argument(trigger, keys)?;
+                let digit = *value.as_bytes().first().context("missing buffer number")?;
+                anyhow::ensure!((b'1'..=b'9').contains(&digit), "buffer number must be 1–9");
+                let sequence = &value[1..];
+                Key::parse_sequence(sequence)?;
+                MetaChordCommand::SetMacro {
+                    name: ChordMacroName::Buffer(digit - b'0'),
+                    sequence: sequence.to_owned(),
+                }
+            }
+            BuiltinChordKind::SetMacro => {
+                let value = self.resolve_argument(trigger, keys)?;
+                let (name, sequence) = value
+                    .split_once('=')
+                    .context("expected <name>=<sequence>")?;
+                anyhow::ensure!(
+                    !name.is_empty() && !name.contains('\\'),
+                    "invalid macro name"
+                );
+                Key::parse_sequence(sequence)?;
+                MetaChordCommand::SetMacro {
+                    name: ChordMacroName::Named(name.to_owned()),
+                    sequence: sequence.to_owned(),
+                }
+            }
         })
+    }
+
+    fn resolve_argument(&self, trigger: &ChordTrigger, keys: &[Key]) -> Result<String> {
+        let argument = self
+            .argument
+            .as_deref()
+            .context("built-in action requires an argument")?;
+        let Some(capture) = argument.strip_prefix('$') else {
+            return Ok(argument.to_owned());
+        };
+        let ChordTrigger::Pattern(pattern) = trigger else {
+            anyhow::bail!("built-in capture requires a regex trigger");
+        };
+        let input = Key::serialize_sequence(keys).context("invalid meta chord")?;
+        let captures = pattern
+            .captures(&input)
+            .context("meta chord did not match")?;
+        Ok(captures
+            .get(
+                capture
+                    .parse::<usize>()
+                    .context("invalid built-in capture")?,
+            )
+            .context("built-in capture not found")?
+            .as_str()
+            .to_owned())
     }
 }
 

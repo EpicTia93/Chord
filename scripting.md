@@ -23,10 +23,19 @@ Complete built-in commands with the normal chord completion controls or the CLI:
 
 | Command | Action |
 | --- | --- |
-| `0s` | Open Chord Settings |
-| `0r` | Reload configuration and stop active loops |
+| `0,` | Open Chord Settings |
+| `0,r` | Reload configuration and stop active loops |
 | `0q` | Quit Chord |
 | `0h<ID>` | Halt the loop with that numeric ID, for example `0h12` |
+| `0b<digit><sequence>` | Save a temporary macro buffer, numbered 1–9 |
+| `0=<name>=<sequence>` | Save a named macro; digit-prefixed names are temporary |
+| `0ls` or `0lsl` | Use the left sidebar layout |
+| `0lf` or `0lfb` | Use the bottom floating layout |
+| `0lv` | Cycle between the layouts |
+
+The selected layout persists across app launches. The compact floating layout fits its
+contents near the bottom center of the display, with keys above the resolved action description.
+Completed chords remain visible until you start another chord or leave chord mode.
 
 These replace the former backslash Settings, Reload, and Quit sequences.
 
@@ -34,11 +43,16 @@ The core file maps chords to native app operations using `builtin` actions:
 
 ```toml
 [chords]
-'0s' = { name = "Settings", builtin = { command = "settings" } }
+'0,' = { name = "Settings", builtin = { command = "settings" } }
 '0h(\d+)' = { name = "Halt loop #$1", builtin = { command = "halt-loop", argument = "$1" } }
+'0b([1-9].*)' = { name = "Save buffer", builtin = { command = "set-buffer", argument = "$1" } }
+'0=([^=]+=.*)' = { name = "Save macro", builtin = { command = "set-macro", argument = "$1" } }
 ```
 
-The supported operations are `settings`, `reload`, `quit`, and `halt-loop`.
+The supported operations are `settings`, `reload`, `quit`, `halt-loop`, `set-buffer`,
+`set-macro`, `set-layout`, and `cycle-layout`. `set-layout` takes `sidebar-left` or
+`floating-bottom` as its `argument`. Macro setters capture the entire payload after `0b` or `0=` in
+their `argument`.
 Only the protected core file has permission to use them. Installed builds bundle
 the file so the controls remain available without external package sources.
 
@@ -62,11 +76,47 @@ with a 10 ms pause between them so immediate actions leave time for other input.
 Backslash introduces special-key notation: `\up`, `\left`, `\down`, and `\right`
 represent arrow keys in TOML triggers and CLI sequences. For example, `'a\up'`
 matches `a` followed by the Up arrow, or the typed escape sequence. Backslash is
-reserved for special keys; bare or unknown escapes cannot define chords or help
-hints. While typing an escape, the input stays pending until the special key is
+reserved for special keys and macro references; bare or unknown escapes cannot
+define chords or help hints. While typing an escape, the input stays pending until the special key is
 complete. Inside parenthesized regex sections, backslash keeps its regex meaning
 (for example, `(\d+)`). Use literal TOML strings (single quotes) to preserve
 backslashes. Backspace continues to edit the chord buffer.
+
+### Macros and temporary buffers
+
+Complete `0b<digit><sequence>` to save a sequence in one of nine numbered buffers.
+For example, `0b11720x864` saves `1720x864` in buffer 1, and `/ws\1` then executes
+the same chord as `/ws1720x864`.
+
+For a named macro, use `0=<name>=<sequence>`. For example,
+`0=window-size=1720x864` makes `/ws\=window-size=` equivalent to `/ws1720x864`.
+Every named reference requires a closing `=`, including at the end of the input.
+More keys can follow it: `a\=window-size=b` expands to `a1720x864b`. Names can
+contain normal chord characters except `=` and backslash; they do not have to be
+identifiers.
+The named macro `\=1=` is separate from numbered buffer `\1`.
+
+Typing `\` in chord mode shows matching macros and their saved sequences before
+arrow-key escapes. Suggestions narrow as you type, including inside a longer
+chord such as `/ws\=win`. Both overlay layouts show these suggestions; named
+references still require their closing `=`.
+
+Named macros persist across app restarts by default. Prefix a name with any digit
+to make it temporary: `0=1window-size=1720x864` defines `\=1window-size=` for the
+current session only. Numbered buffers `\1`–`\9` are always temporary. Leaving
+chord mode, clearing the input buffer, and reloading configuration preserve all
+definitions.
+
+Settings → Macros lists the current definitions and lets you add, rename, edit,
+and delete named macros or edit and clear numbered buffers. Renaming a named
+macro to start with a digit removes its saved definition; renaming it back saves
+it across restarts. Saving the same name or number overwrites its value; an empty
+sequence, such as `0b1` or `0=window-size=`, sets it to an empty expansion.
+
+Macro bodies are saved verbatim and can reference other macros. Expansion happens
+before repeat-prefix parsing, trigger matching, and handler argument captures;
+handlers receive the expanded command as `this.input`. Missing references keep
+input pending. Recursive definitions and excessive expansion are rejected.
 
 ### Handler events
 

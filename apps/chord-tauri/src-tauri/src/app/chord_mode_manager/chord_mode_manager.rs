@@ -1,14 +1,14 @@
 use crate::app::chord_mode_manager::{ChordInputManager, ChordModePanel, NativeSurfaceRect};
+use crate::models::{Key, KeyEvent};
 use crate::state::{
     ChordInputObservable, ChordInputState, ChordPanelObservable, ChordPanelState, Observable,
 };
 use anyhow::Result;
+use keycode::KeyMappingCode;
 use nject::injectable;
 use parking_lot::Mutex;
 use std::collections::HashSet;
-use keycode::KeyMappingCode;
 use tauri::{AppHandle, Listener};
-use crate::models::{Key, KeyEvent};
 
 #[injectable]
 pub struct ChordModeManager {
@@ -21,6 +21,7 @@ pub struct ChordModeManager {
 
 impl ChordModeManager {
     pub(super) fn init(&self) -> Result<()> {
+        self.input_manager.load_macros()?;
         self.panel.init()?;
 
         let surface_window = self.panel.get_or_create_window()?;
@@ -55,12 +56,26 @@ impl ChordModeManager {
         self.input_manager.execute_sequence(sequence)
     }
 
+    pub fn update_macro(
+        &self,
+        target: crate::models::ChordMacroName,
+        sequence: Option<String>,
+        previous: Option<crate::models::ChordMacroName>,
+    ) -> Result<()> {
+        self.input_manager.update_macro(target, sequence, previous)
+    }
+
     pub fn stop_loops(&self) -> Result<()> {
         self.input_manager.stop_loops()
     }
 
-    pub fn configure_meta_commands(&self, hints: Vec<crate::state::MetaChordHint>, halt_loop_template: String) -> Result<()> {
-        self.input_manager.configure_meta_commands(hints, halt_loop_template)
+    pub fn configure_meta_commands(
+        &self,
+        hints: Vec<crate::state::MetaChordHint>,
+        halt_loop_template: String,
+    ) -> Result<()> {
+        self.input_manager
+            .configure_meta_commands(hints, halt_loop_template)
     }
 
     pub fn ensure_active(&self) -> Result<()> {

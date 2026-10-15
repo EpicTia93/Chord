@@ -10,7 +10,6 @@ use anyhow::Result;
 use bitflags::bitflags;
 use keycode::KeyMappingCode;
 use nject::injectable;
-use std::os::raw::c_int;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc::{TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -429,12 +428,7 @@ impl AppKeyboard {
     }
 
     pub fn emit_caps_lock() -> Result<()> {
-        let rc = unsafe { toggle_caps() };
-        if rc == 0 {
-            Ok(())
-        } else {
-            anyhow::bail!("failed to toggle caps lock state via native layer: {rc}")
-        }
+        super::caps_lock::toggle()
     }
 
     pub fn set_caps_lock_off() -> Result<()> {
@@ -442,28 +436,11 @@ impl AppKeyboard {
     }
 
     pub fn set_caps_lock(enabled: bool) -> Result<()> {
-        let rc = unsafe {
-            if enabled {
-                set_caps_on()
-            } else {
-                set_caps_off()
-            }
-        };
-        if rc == 0 {
-            Ok(())
-        } else {
-            anyhow::bail!("failed to set caps lock state via native layer: {rc}")
-        }
+        super::caps_lock::set(enabled)
     }
 
     pub fn get_caps_lock() -> Result<bool> {
-        let mut state: c_int = 0;
-        let rc = unsafe { get_caps_state(&mut state) };
-        if rc == 0 {
-            Ok(state != 0)
-        } else {
-            anyhow::bail!("failed to read caps lock state via native layer: {rc}")
-        }
+        super::caps_lock::get()
     }
 
     /// Updates the tracked keyboard state and decides whether the event
@@ -546,9 +523,3 @@ impl AppKeyboard {
     }
 }
 
-unsafe extern "C" {
-    fn toggle_caps() -> c_int;
-    fn set_caps_on() -> c_int;
-    fn set_caps_off() -> c_int;
-    fn get_caps_state(out_state: *mut c_int) -> c_int;
-}

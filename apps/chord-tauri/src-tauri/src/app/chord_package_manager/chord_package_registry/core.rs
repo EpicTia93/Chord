@@ -158,11 +158,15 @@ pub(in crate::app::chord_package_manager) fn meta_configuration(
             BuiltinChordKind::Settings,
             BuiltinChordKind::Reload,
             BuiltinChordKind::Quit,
-            BuiltinChordKind::HaltLoop
+            BuiltinChordKind::HaltLoop,
+            BuiltinChordKind::SetBuffer,
+            BuiltinChordKind::SetMacro,
+            BuiltinChordKind::SetLayout,
+            BuiltinChordKind::CycleLayout,
         ]
         .iter()
         .all(|kind| required.contains(kind)),
-        "Chord's core file must retain Settings, Reload, Quit, and Halt actions"
+        "Chord's core file must retain Settings, Reload, Quit, Halt, macro, and layout actions"
     );
     Ok((
         hints,
@@ -173,7 +177,7 @@ pub(in crate::app::chord_package_manager) fn meta_configuration(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ChordAction, Key, MetaChordCommand, ParsedChordsFile};
+    use crate::models::{ChordAction, ChordLayout, Key, MetaChordCommand, ParsedChordsFile};
 
     #[test]
     fn bundled_file_defines_actions_and_matches_the_canonical_distribution_copy() {
@@ -186,10 +190,24 @@ mod tests {
         );
         let file = ParsedChordsFile::parse_core(BUNDLED_BINDINGS).unwrap();
         for (input, expected) in [
-            ("0s", MetaChordCommand::Settings),
-            ("0r", MetaChordCommand::Reload),
+            ("0,", MetaChordCommand::Settings),
+            ("0,r", MetaChordCommand::Reload),
             ("0q", MetaChordCommand::Quit),
             ("0h12", MetaChordCommand::Halt(12)),
+            ("0ls", MetaChordCommand::SetLayout(ChordLayout::SidebarLeft)),
+            (
+                "0lsl",
+                MetaChordCommand::SetLayout(ChordLayout::SidebarLeft),
+            ),
+            (
+                "0lf",
+                MetaChordCommand::SetLayout(ChordLayout::FloatingBottom),
+            ),
+            (
+                "0lfb",
+                MetaChordCommand::SetLayout(ChordLayout::FloatingBottom),
+            ),
+            ("0lv", MetaChordCommand::CycleLayout),
         ] {
             let keys = Key::parse_sequence(input).unwrap();
             let chord = file
@@ -201,6 +219,15 @@ mod tests {
                 panic!()
             };
             assert_eq!(action.resolve(&chord.trigger, &keys).unwrap(), expected);
+        }
+        for input in ["0l", "0lss", "0lfx", "0lvs"] {
+            let keys = Key::parse_sequence(input).unwrap();
+            assert!(
+                !file
+                    .chords
+                    .iter()
+                    .any(|chord| chord.trigger.matches_in_namespace(&keys, true))
+            );
         }
     }
 
@@ -232,9 +259,9 @@ mod tests {
     #[test]
     fn core_bootstrap_and_help_follow_toml_bindings_without_optional_sources() {
         let source = BUNDLED_BINDINGS
-            .replace("'0s'", "'0x'")
+            .replace("'0,'", "'0x'")
             .replace("0h", "0j")
-            .replace("Settings\"", "Preferences\"");
+            .replace("Chord: Settings'", "Preferences'");
         let mut package = compile_core_contents(&source).unwrap();
         let (hints, halt_template) = meta_configuration(&package).unwrap();
         assert_eq!(halt_template, "0j{id}");
@@ -243,7 +270,7 @@ mod tests {
                 .iter()
                 .any(|hint| hint.sequence == "0x" && hint.name == "Preferences")
         );
-        assert!(!hints.iter().any(|hint| hint.sequence == "0s"));
+        assert!(!hints.iter().any(|hint| hint.sequence == "0,"));
         for app in [None, Some("com.apple.finder".into())] {
             let event = crate::models::ChordInputEvent {
                 input: Key::parse_sequence("0x").unwrap(),
@@ -254,7 +281,7 @@ mod tests {
         package.compiled_chords_files.clear();
         assert!(meta_configuration(&package).is_err());
         let missing_action = BUNDLED_BINDINGS.replace(
-            "'0q' = { name = \"Quit Chord\", builtin = { command = \"quit\" } }",
+            "'0q' = { name = 'Chord: Quit', builtin = { command = 'quit' } }",
             "",
         );
         assert!(compile_core_contents(&missing_action).is_err());

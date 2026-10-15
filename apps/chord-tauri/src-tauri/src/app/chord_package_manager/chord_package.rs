@@ -39,6 +39,16 @@ impl ChordPackage {
         let Some(app_id) = &event.application_id else {
             return Vec::new();
         };
+        self.matching_app_chords_for_id(event, app_id)
+    }
+
+    /// Match an additional UI context without changing the real focused app
+    /// carried by the event and exposed to JavaScript handlers.
+    pub fn matching_app_chords_for_id(
+        &self,
+        event: &ChordInputEvent,
+        app_id: &str,
+    ) -> Vec<ChordReference> {
         let pathslug = PathBuf::from(format!("chords/{}/macos.toml", app_id.replace(".", "/")));
         let Some(file) = self.compiled_chords_files.get(&pathslug) else {
             return Vec::new();

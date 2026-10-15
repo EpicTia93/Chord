@@ -5,6 +5,8 @@ mod chord_input;
 pub use chord_input::*;
 mod chord_execution;
 pub use chord_execution::*;
+mod chord_macros;
+pub use chord_macros::*;
 mod chord_package_manager;
 pub use chord_package_manager::*;
 mod chord_package_registry;

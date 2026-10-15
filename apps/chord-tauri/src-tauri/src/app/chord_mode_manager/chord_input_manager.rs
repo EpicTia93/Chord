@@ -4,18 +4,20 @@ use crate::app::AppHandleExt;
 use crate::app::chord_runner::release_chord_sequences;
 use crate::app::state::AppSingleton;
 use crate::models::{
-    ChordEventTrigger, ChordInputEvent, ChordKeyboardEvent, ChordTaskAction, Key, KeyEvent,
-    MetaChordCommand,
+    ChordEventTrigger, ChordInputEvent, ChordKeyboardEvent, ChordMacroName, ChordMacros,
+    ChordTaskAction, Key, KeyEvent, MetaChordCommand,
 };
 use crate::state::{
-    ChordExecutionObservable, ChordInputObservable, ChordInputState, MetaChordHint, Observable,
+    ChordExecutionObservable, ChordInputObservable, ChordInputState, ChordMacrosObservable,
+    ChordMacrosState, MetaChordHint, Observable,
 };
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use keycode::KeyMappingCode;
 use nject::injectable;
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use tauri::AppHandle;
+use tauri_plugin_store::StoreExt;
 use tokio::sync::oneshot;
 
 #[injectable]
@@ -34,9 +36,67 @@ pub struct ChordInputManager {
     handle: AppHandle,
     observable: ChordInputObservable,
     execution_observable: ChordExecutionObservable,
+    macros_observable: ChordMacrosObservable,
 }
 
 impl ChordInputManager {
+    pub(super) fn load_macros(&self) -> Result<()> {
+        let store = self
+            .handle
+            .store_builder("named-macros.json")
+            .disable_auto_save()
+            .build()?;
+        match store.reload() {
+            Ok(()) => {}
+            Err(tauri_plugin_store::Error::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("failed to load named macros"),
+        }
+        let definitions = store
+            .get("definitions")
+            .map(serde_json::from_value)
+            .transpose()
+            .context("failed to read named macros")?
+            .unwrap_or_default();
+        let mut sequence = self.sequence.lock();
+        sequence.macros = ChordMacros::from_persistent(definitions)?;
+        self.macros_observable.set_state(|_| ChordMacrosState {
+            entries: sequence.macros.entries(),
+        })
+    }
+
+    pub fn update_macro(
+        &self,
+        target: ChordMacroName,
+        value: Option<String>,
+        previous: Option<ChordMacroName>,
+    ) -> Result<()> {
+        let mut sequence = self.sequence.lock();
+        sequence
+            .macros
+            .update(target, value, previous, |definitions| {
+                let store = self
+                    .handle
+                    .store_builder("named-macros.json")
+                    .disable_auto_save()
+                    .build()?;
+                let old = store.get("definitions");
+                store.set("definitions", serde_json::to_value(definitions)?);
+                if let Err(error) = store.save() {
+                    if let Some(old) = old {
+                        store.set("definitions", old);
+                    } else {
+                        store.delete("definitions");
+                    }
+                    return Err(error).context("failed to save named macros");
+                }
+                Ok(())
+            })?;
+        self.macros_observable.set_state(|_| ChordMacrosState {
+            entries: sequence.macros.entries(),
+        })
+    }
+
     pub fn reset(&self) -> Result<()> {
         self.held_keys.lock().clear();
         self.end_active_task();
@@ -159,9 +219,12 @@ impl ChordInputManager {
                     )?;
                     if let Some(input_event) = dispatch.input_event.clone() {
                         self.set_executed_event(input_event)?;
+                        self.run_dispatch(dispatch, false)?;
+                        self.reset_matching_chords()?;
+                    } else {
+                        self.run_dispatch(dispatch, false)?;
+                        self.clear_key_buffer()?;
                     }
-                    self.run_dispatch(dispatch, false)?;
-                    self.clear_key_buffer()?;
                 }
             }
             KeyEvent::Press(Key(KeyMappingCode::CapsLock)) => {
@@ -249,7 +312,17 @@ impl ChordInputManager {
     }
 
     fn run_dispatch(&self, mut dispatch: ChordSequenceDispatch, hold_input: bool) -> Result<()> {
-        if let Some(command) = dispatch.meta_command {
+        if let Some(description) = dispatch.description.take() {
+            self.observable.set_state(|mut state| {
+                // Keyup callbacks for an emptied buffer must not replace the
+                // description of the chord that just completed.
+                if state.selected_input_event.is_none() || dispatch.input_event.is_some() {
+                    state.description = Some(description);
+                }
+                state
+            })?;
+        }
+        if let Some(command) = dispatch.meta_command.take() {
             match command {
                 MetaChordCommand::Settings => self.handle.app_state().settings().ui.open()?,
                 MetaChordCommand::Reload => {
@@ -261,6 +334,21 @@ impl ChordInputManager {
                     self.handle.exit(0);
                 }
                 MetaChordCommand::Halt(id) => self.loops.halt(id, &self.execution_observable)?,
+                MetaChordCommand::SetLayout(layout) => self
+                    .handle
+                    .app_state()
+                    .chord_mode_manager()
+                    .panel
+                    .set_layout(layout)?,
+                MetaChordCommand::CycleLayout => self
+                    .handle
+                    .app_state()
+                    .chord_mode_manager()
+                    .panel
+                    .cycle_layout()?,
+                MetaChordCommand::SetMacro { name, sequence } => {
+                    self.update_macro(name, Some(sequence), None)?;
+                }
             }
         }
         let loop_run = dispatch
@@ -408,6 +496,7 @@ impl ChordInputManager {
         let next_key_buffer = Self::next_key_buffer_for_unshifted_press(&state.input, key);
         self.observable.set_state(|state| ChordInputState {
             input: next_key_buffer,
+            description: None,
             selected_input_event: None,
             pressed_input_event: None,
             ..state
@@ -428,6 +517,7 @@ impl ChordInputManager {
             input: vec![],
             selected_input_event: None,
             pressed_input_event: None,
+            description: None,
             ..state
         })?;
         self.reset_matching_chords()
@@ -461,6 +551,7 @@ impl ChordInputManager {
         } else {
             self.observable.set_state(|state| ChordInputState {
                 input: sequence,
+                description: None,
                 selected_input_event: None,
                 pressed_input_event: None,
                 ..state

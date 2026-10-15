@@ -7,6 +7,7 @@ use typeshare::typeshare;
 #[serde(rename_all = "camelCase")]
 pub struct FrontmostState {
     pub frontmost_app_bundle_id: Option<String>,
+    pub file_picker_active: bool,
 }
 
 define_observable!(

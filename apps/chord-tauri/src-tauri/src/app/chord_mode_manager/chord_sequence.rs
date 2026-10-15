@@ -1,8 +1,9 @@
 use crate::app::chord_package_manager::{ChordPackage, ChordReference};
 use crate::app::chord_runner::ChordActionTask;
 use crate::models::{
-    ChordAction, ChordCommand, ChordEventTrigger, ChordInputEvent, ChordKeyboardEvent, ChordRepeat,
-    ChordTaskAction, MetaChordCommand, is_core_chords_file,
+    BuiltinChordKind, ChordAction, ChordCommand, ChordEventTrigger, ChordInputEvent,
+    ChordKeyboardEvent, ChordMacroName, ChordMacros, ChordRepeat, ChordTaskAction, Key,
+    MetaChordCommand, is_core_chords_file,
 };
 use anyhow::Result;
 use parking_lot::Mutex;
@@ -36,6 +37,7 @@ impl ChordIdentity {
 #[derive(Default)]
 pub(super) struct ChordSequence {
     active: HashMap<ChordIdentity, String>,
+    pub(super) macros: ChordMacros,
 }
 
 #[derive(Default)]
@@ -43,6 +45,7 @@ pub(super) struct ChordSequenceDispatch {
     pub tasks: Vec<ChordActionTask>,
     pub expired: Vec<String>,
     pub input_event: Option<ChordInputEvent>,
+    pub description: Option<String>,
     pub meta_command: Option<MetaChordCommand>,
     pub loop_task: Option<ChordActionTask>,
 }
@@ -53,31 +56,81 @@ impl ChordSequence {
         raw_event: ChordInputEvent,
         triggers: &[ChordEventTrigger],
         keyboard_event: Option<&ChordKeyboardEvent>,
-        matching: impl FnOnce(&ChordInputEvent) -> Vec<(ChordPackage, ChordReference)>,
+        mut matching: impl FnMut(&ChordInputEvent) -> Vec<(ChordPackage, ChordReference)>,
     ) -> Result<ChordSequenceDispatch> {
-        let (keys, repeat) = match ChordCommand::parse(&raw_event.input)? {
-            ChordCommand::Meta => {
-                let mut command = None;
-                if triggers.contains(&ChordEventTrigger::Input) {
-                    for (_, reference) in matching(&raw_event) {
-                        if !is_core_chords_file(
-                            &reference.package_name,
-                            &reference.chords_file_pathslug,
+        if raw_event
+            .input
+            .first()
+            .is_some_and(|key| key.to_sequence_char() == Some('0'))
+        {
+            if !triggers.contains(&ChordEventTrigger::Input) {
+                return Ok(ChordSequenceDispatch {
+                    expired: self.reset(),
+                    ..Default::default()
+                });
+            }
+            // Resolve configured core setters before expansion so their bodies are
+            // saved verbatim. All other commands can use macros in their arguments.
+            let input = Key::serialize_sequence(&raw_event.input)
+                .and_then(|s| Key::parse_sequence(&s).ok());
+            if let Some(input) = input {
+                let event = ChordInputEvent {
+                    input,
+                    application_id: raw_event.application_id.clone(),
+                };
+                for (_, reference) in matching(&event) {
+                    if !is_core_chords_file(
+                        &reference.package_name,
+                        &reference.chords_file_pathslug,
+                    ) {
+                        continue;
+                    }
+                    if let Some(ChordAction::Builtin(action)) = reference.chord.actions.first() {
+                        if matches!(
+                            action.command,
+                            BuiltinChordKind::SetBuffer | BuiltinChordKind::SetMacro
                         ) {
-                            continue;
+                            let command = action.resolve(&reference.chord.trigger, &event.input)?;
+                            return Ok(ChordSequenceDispatch {
+                                expired: self.reset(),
+                                input_event: Some(raw_event),
+                                description: Some(reference.chord.description(&event.input)),
+                                meta_command: Some(command),
+                                ..Default::default()
+                            });
                         }
-                        if let Some(ChordAction::Builtin(action)) = reference.chord.actions.first()
-                        {
-                            command =
-                                Some(action.resolve(&reference.chord.trigger, &raw_event.input)?);
-                            break;
+                    }
+                }
+            }
+        }
+        let (keys, repeat) = match ChordCommand::parse(&raw_event.input, &self.macros)? {
+            ChordCommand::Meta { keys } => {
+                let event = ChordInputEvent {
+                    input: keys,
+                    application_id: raw_event.application_id.clone(),
+                };
+                let mut command = None;
+                let mut description = None;
+                for (_, reference) in matching(&event) {
+                    if !is_core_chords_file(
+                        &reference.package_name,
+                        &reference.chords_file_pathslug,
+                    ) {
+                        continue;
+                    }
+                    if let Some(ChordAction::Builtin(action)) = reference.chord.actions.first() {
+                        description = Some(reference.chord.description(&event.input));
+                        if triggers.contains(&ChordEventTrigger::Input) {
+                            command = Some(action.resolve(&reference.chord.trigger, &event.input)?);
                         }
+                        break;
                     }
                 }
                 return Ok(ChordSequenceDispatch {
                     expired: self.reset(),
-                    input_event: command.map(|_| raw_event),
+                    input_event: command.as_ref().map(|_| raw_event),
                     meta_command: command,
+                    description,
                     ..Default::default()
                 });
             }
@@ -99,6 +152,15 @@ impl ChordSequence {
             ChordRepeat::Loop => 1,
         };
         let mut dispatch = self.dispatch(&event, &contexts, triggers, keyboard_event, num_times)?;
+        if let Some(description) = &mut dispatch.description {
+            match repeat {
+                ChordRepeat::Times(1) => {}
+                ChordRepeat::Times(count) => {
+                    *description = format!("Repeat {count} times · {description}")
+                }
+                ChordRepeat::Loop => *description = format!("Loop · {description}"),
+            }
+        }
         if dispatch.input_event.is_some() {
             dispatch.input_event = Some(raw_event);
             if repeat == ChordRepeat::Loop {
@@ -117,6 +179,10 @@ impl ChordSequence {
 
     pub fn reset(&mut self) -> Vec<String> {
         self.active.drain().map(|(_, id)| id).collect()
+    }
+
+    pub fn set_macro(&mut self, name: ChordMacroName, sequence: String) {
+        self.macros.set(name, sequence);
     }
 
     /// A background loop owns its persistent values until it halts or fails.
@@ -143,6 +209,17 @@ impl ChordSequence {
             .map(|(_, r)| ChordIdentity::new(r, event))
             .collect();
         let mut dispatch = ChordSequenceDispatch::default();
+        dispatch.description = contexts
+            .iter()
+            .find(|(_, reference)| {
+                reference
+                    .chord
+                    .actions
+                    .iter()
+                    .any(|action| action.trigger() == ChordEventTrigger::Input)
+            })
+            .or_else(|| contexts.first())
+            .map(|(_, reference)| reference.chord.description(&event.input));
         self.active.retain(|identity, id| {
             if matching.contains(identity) {
                 true
@@ -196,6 +273,7 @@ impl ChordSequence {
                             keyboard_event.cloned(),
                         )? {
                             dispatch.input_event = Some(event.clone());
+                            dispatch.description = Some(reference.chord.description(&event.input));
                             dispatch.tasks.push(task);
                         }
                         // Ordinary chord completion retains the existing first-match priority.
@@ -329,6 +407,45 @@ mod tests {
             .collect()
     }
 
+    fn core_fixture(source: &str) -> ChordPackage {
+        use crate::models::{CORE_CHORD_FILE, CORE_CHORD_PACKAGE};
+        let mut core = fixture("name = 'fixture'");
+        core.name = CORE_CHORD_PACKAGE.into();
+        core.global_chords = ParsedChordsFile::parse_core(source)
+            .unwrap()
+            .chords
+            .into_iter()
+            .map(|chord| ChordReference {
+                package_name: core.name.clone(),
+                chords_file_pathslug: PathBuf::from(CORE_CHORD_FILE),
+                chord,
+            })
+            .collect();
+        core
+    }
+
+    fn save_macro(sequence: &mut ChordSequence, core: &ChordPackage, input: &str) {
+        let dispatch = sequence
+            .dispatch_command(event(input), &[ChordEventTrigger::Input], None, |e| {
+                core.matching_global_chords(e)
+                    .into_iter()
+                    .map(|r| (core.clone(), r))
+                    .collect()
+            })
+            .unwrap();
+        assert_eq!(dispatch.input_event, Some(event(input)));
+        assert!(dispatch.tasks.is_empty() && dispatch.loop_task.is_none());
+        let Some(MetaChordCommand::SetMacro {
+            name,
+            sequence: value,
+        }) = dispatch.meta_command
+        else {
+            panic!("expected core macro setter")
+        };
+        // The input manager applies the resolved native operation on completion.
+        sequence.set_macro(name, value);
+    }
+
     fn handlers(dispatch: &ChordSequenceDispatch) -> Vec<&str> {
         dispatch
             .tasks
@@ -373,6 +490,49 @@ name = "Instagram"
                     .is_none()
             );
         }
+    }
+
+    #[test]
+    fn descriptions_follow_resolved_captures_macros_and_repeat_counts() {
+        let package = fixture(
+            r#"name = 'fixture'
+[chords]
+'hsr(\d+)' = { name = 'Reply to story $1', '@input:input' = ['$1'] }
+"#,
+        );
+        let mut sequence = ChordSequence::default();
+        sequence.set_macro(ChordMacroName::Buffer(1), "hsr34".into());
+        for (input, description) in [
+            ("hsr34", "Reply to story 34"),
+            ("12hsr34", "Repeat 12 times · Reply to story 34"),
+            (r"\1", "Reply to story 34"),
+            (r"12\1", "Repeat 12 times · Reply to story 34"),
+            ("1hsr34", "Loop · Reply to story 34"),
+        ] {
+            for trigger in [ChordEventTrigger::Keydown, ChordEventTrigger::Input] {
+                let dispatch = sequence
+                    .dispatch_command(event(input), &[trigger], None, |e| contexts(&package, e))
+                    .unwrap();
+                assert_eq!(dispatch.description.as_deref(), Some(description));
+                assert_eq!(
+                    dispatch.input_event.is_some(),
+                    trigger == ChordEventTrigger::Input
+                );
+            }
+        }
+        let core = core_fixture(include_str!(concat!(
+            env!("OUT_DIR"),
+            "/chords-chord.macos.toml"
+        )));
+        let dispatch = sequence
+            .dispatch_command(event("0h12"), &[ChordEventTrigger::Input], None, |e| {
+                core.matching_global_chords(e)
+                    .into_iter()
+                    .map(|r| (core.clone(), r))
+                    .collect()
+            })
+            .unwrap();
+        assert_eq!(dispatch.description.as_deref(), Some("Halt loop #12"));
     }
 
     #[test]
@@ -464,8 +624,8 @@ name = "fixture"
             r#"
 name = "fixture"
 [chords]
-'j,' = { '@init:prepare' = [], '@keydown:down' = [] }
-'j,(.*)' = { '@init:prepare' = [], '@keydown:down' = [], '@input:input' = ['$1'] }
+'j,' = { name = "Keyboard callbacks", '@init:prepare' = [], '@keydown:down' = [] }
+'j,(.*)' = { name = "Execute input", '@init:prepare' = [], '@keydown:down' = [], '@input:input' = ['$1'] }
 "#,
         );
         let e = event("j,");
@@ -494,6 +654,7 @@ name = "fixture"
         };
         assert_ne!(first.sequence_id, second.sequence_id);
         assert!(dispatch.input_event.is_some());
+        assert_eq!(dispatch.description.as_deref(), Some("Execute input"));
     }
 
     #[test]
@@ -582,28 +743,15 @@ name = "fixture"
 
     #[test]
     fn meta_dispatch_uses_only_the_protected_file_and_its_configured_bindings() {
-        use crate::models::{CORE_CHORD_FILE, CORE_CHORD_PACKAGE};
-        let mut core = fixture("name = 'fixture'");
-        let path = PathBuf::from(CORE_CHORD_FILE);
         let source = include_str!(concat!(env!("OUT_DIR"), "/chords-chord.macos.toml"))
-            .replace("'0s'", "'0x'");
-        let parsed = ParsedChordsFile::parse_core(&source).unwrap();
-        core.name = CORE_CHORD_PACKAGE.into();
-        core.global_chords = parsed
-            .chords
-            .iter()
-            .map(|chord| ChordReference {
-                package_name: core.name.clone(),
-                chords_file_pathslug: path.clone(),
-                chord: chord.clone(),
-            })
-            .collect();
+            .replace("'0,'", "'0x'");
+        let core = core_fixture(&source);
         let other = fixture("name = 'fixture'\n[chords]\n'(.*)' = { '@input:input' = [] }");
         let mut sequence = ChordSequence::default();
         for (input, expected) in [
             ("0x", Some(MetaChordCommand::Settings)),
-            ("0s", None),
-            ("0r", Some(MetaChordCommand::Reload)),
+            ("0,", None),
+            ("0,r", Some(MetaChordCommand::Reload)),
             ("0q", Some(MetaChordCommand::Quit)),
             ("0h12", Some(MetaChordCommand::Halt(12))),
             ("0h12x", None),
@@ -636,6 +784,153 @@ name = "fixture"
             },
         );
         assert!(overflow.is_err());
+    }
+
+    #[test]
+    fn core_macro_setters_expand_before_matching_captures_and_keyboard_handlers() {
+        let core = core_fixture(include_str!(concat!(
+            env!("OUT_DIR"),
+            "/chords-chord.macos.toml"
+        )));
+        let package = fixture(
+            r#"name = 'fixture'
+[chords]
+'/ws(\d+)x(\d+)' = { '@keydown:down' = ['$1', '$2'], '@input:input' = ['$1', '$2'] }
+"#,
+        );
+        let mut sequence = ChordSequence::default();
+        for digit in 1..=9 {
+            save_macro(&mut sequence, &core, &format!("0b{digit}1720x864"));
+        }
+        save_macro(&mut sequence, &core, r"0=window-size=\1");
+        sequence.reset();
+        // A known name stays pending until its closing delimiter is typed.
+        let mut incomplete = event("/ws");
+        incomplete.input.extend(
+            r"\=window-size"
+                .chars()
+                .map(|c| c.to_string().parse::<Key>().unwrap()),
+        );
+        let dispatch = sequence
+            .dispatch_command(
+                incomplete,
+                &[ChordEventTrigger::Keydown, ChordEventTrigger::Input],
+                None,
+                |_| panic!("unterminated named macros must not reach handlers"),
+            )
+            .unwrap();
+        assert!(dispatch.tasks.is_empty() && dispatch.input_event.is_none());
+        for input in (1..=9)
+            .map(|digit| format!(r"/ws\{digit}"))
+            .chain([r"/ws\=window-size=".into()])
+        {
+            let raw = event(&input);
+            let dispatch = sequence
+                .dispatch_command(
+                    raw.clone(),
+                    &[ChordEventTrigger::Keydown, ChordEventTrigger::Input],
+                    None,
+                    |e| contexts(&package, e),
+                )
+                .unwrap();
+            assert_eq!(handlers(&dispatch), ["down", "input"]);
+            assert_eq!(dispatch.input_event, Some(raw));
+            for task in &dispatch.tasks {
+                let ChordTaskAction::Handler(action) = &task.action else {
+                    panic!()
+                };
+                assert_eq!(action.input, "/ws1720x864");
+                assert_eq!(action.event_args, ["1720".into(), "864".into()]);
+            }
+        }
+        // Nested references see new values after an overwrite.
+        save_macro(&mut sequence, &core, "0b1800x600");
+        let dispatch = sequence
+            .dispatch_command(
+                event(r"2/ws\=window-size="),
+                &[ChordEventTrigger::Input],
+                None,
+                |e| contexts(&package, e),
+            )
+            .unwrap();
+        let ChordTaskAction::Handler(action) = &dispatch.tasks[0].action else {
+            panic!()
+        };
+        assert_eq!(action.input, "/ws800x600");
+        assert_eq!(action.event_args, ["800".into(), "600".into()]);
+        assert_eq!(dispatch.tasks[0].num_times, 2);
+
+        save_macro(&mut sequence, &core, "0b212");
+        save_macro(&mut sequence, &core, "0=preferences=0,");
+        for (input, expected) in [
+            (r"0h\2", MetaChordCommand::Halt(12)),
+            (r"\=preferences=", MetaChordCommand::Settings),
+        ] {
+            let dispatch = sequence
+                .dispatch_command(event(input), &[ChordEventTrigger::Input], None, |e| {
+                    core.matching_global_chords(e)
+                        .into_iter()
+                        .map(|r| (core.clone(), r))
+                        .collect()
+                })
+                .unwrap();
+            assert_eq!(dispatch.meta_command, Some(expected));
+        }
+
+        // A fresh app session has no definitions and cannot dispatch literal references.
+        let dispatch = ChordSequence::default()
+            .dispatch_command(event(r"/ws\1"), &[ChordEventTrigger::Input], None, |_| {
+                panic!("undefined macros must not reach handlers")
+            })
+            .unwrap();
+        assert!(dispatch.input_event.is_none() && dispatch.tasks.is_empty());
+    }
+
+    #[test]
+    fn macro_setters_wait_for_completion_and_reject_invalid_targets() {
+        let core = core_fixture(include_str!(concat!(
+            env!("OUT_DIR"),
+            "/chords-chord.macos.toml"
+        )));
+        let mut sequence = ChordSequence::default();
+        let typing = sequence
+            .dispatch_command(event("0b1ab"), &[ChordEventTrigger::Keydown], None, |_| {
+                panic!("typing a setter must not visit handlers")
+            })
+            .unwrap();
+        assert!(typing.meta_command.is_none() && typing.input_event.is_none());
+        for input in ["0b0ab", "0b", "0=", "0==ab"] {
+            let dispatch = sequence
+                .dispatch_command(event(input), &[ChordEventTrigger::Input], None, |e| {
+                    core.matching_global_chords(e)
+                        .into_iter()
+                        .map(|r| (core.clone(), r))
+                        .collect()
+                })
+                .unwrap();
+            assert!(
+                dispatch.meta_command.is_none() && dispatch.input_event.is_none(),
+                "{input}"
+            );
+        }
+        save_macro(&mut sequence, &core, "0b1");
+        save_macro(&mut sequence, &core, "0=empty=");
+        assert_eq!(
+            sequence.macros.expand(r"a\1\=empty=b").unwrap().as_deref(),
+            Some("ab")
+        );
+
+        // Setters follow core TOML bindings even when their prefixes change.
+        let source = include_str!(concat!(env!("OUT_DIR"), "/chords-chord.macos.toml"))
+            .replace("'0b(", "'0z(")
+            .replace("'0=(", "'0m(");
+        let remapped = core_fixture(&source);
+        save_macro(&mut sequence, &remapped, "0z2ab");
+        save_macro(&mut sequence, &remapped, r"0mmy.name=\2");
+        assert_eq!(
+            sequence.macros.expand(r"\=my.name=").unwrap().as_deref(),
+            Some("ab")
+        );
     }
 
     #[tokio::test]

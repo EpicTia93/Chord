@@ -1,0 +1,27 @@
+{
+  "name": "@chord/dev.improve.chord.routes.settings.macros.index",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#settings-macros-page": "./settings-macros-page.tsx"
+  },
+  "exports": {
+    ".": "./+.ts"
+  },
+  "dependencies": {
+    "@chord/com.npmjs.tanstack__react-query": "workspace:*",
+    "@chord/dev.improve.chord.api.taurpc": "workspace:*",
+    "@chord/dev.improve.chord.components.ui.badge": "workspace:*",
+    "@chord/dev.improve.chord.components.ui.button": "workspace:*",
+    "@chord/dev.improve.chord.components.ui.card": "workspace:*",
+    "@chord/dev.improve.chord.components.ui.input": "workspace:*",
+    "@chord/dev.improve.chord.lib.state": "workspace:*",
+    "@chord/dev.improve.chord.lib.typeshare": "workspace:*",
+    "lucide-react": "^1.55.0",
+    "react": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0"
+  }
+}
