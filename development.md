@@ -192,6 +192,11 @@ running a polling timer. Initial attachment also recognizes an already-open pane
 Revoking Accessibility access releases the observers and clears the context;
 granting it attaches them again.
 
+The listener lives in `app/frontmost/file_picker/native.rs`, using `objc2`
+framework bindings. Raw Caps Lock input and toggle state live in
+`app/keyboard/caps_listener.rs` and `caps_lock.rs`. These components and their
+fixtures are Rust; Chord no longer compiles handwritten C or Objective-C sources.
+
 Detection uses AppKit's nonlocalized `open-panel` / `save-panel` identifiers on
 the focused picker or its containing sheet, so ordinary alerts do not activate
 Finder chords. Custom file browsers without those identifiers are not recognized.

@@ -32,6 +32,10 @@ crate-type = [
 name = "chord"
 path = "src/main.rs"
 
+[[example]]
+name = "file-picker"
+path = "tests/file-picker/listener.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -100,7 +104,7 @@ objc2-foundation = { version = "0.3.2", features = [ "block2" ] }
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"
 objc2-io-kit = { version = "0.3.2", default-features = false, features = ["std", "hid", "hidsystem", "libc"] }
-objc2-application-services = { version = "0.3.2", default-features = false, features = ["std", "AXUIElement", "AXError", "libc"] }
+objc2-application-services = { version = "0.3.2", default-features = false, features = ["std", "HIServices", "AXUIElement", "AXError", "libc"] }
 macos-accessibility-client = "0.0.2"
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1", version = "2.1.0" }
 raw-window-handle = "0.6"

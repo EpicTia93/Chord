@@ -1,9 +1,10 @@
 //! Caps Lock toggle state through IOKit's HID system connection.
 use anyhow::{Context, Result, ensure};
+use objc2_core_foundation::CFRetained;
 use objc2_io_kit::{
-    IOHIDGetModifierLockState, IOHIDSetModifierLockState, IOObjectRelease,
-    IOServiceClose, IOServiceGetMatchingService, IOServiceMatching, IOServiceOpen,
-    kIOHIDCapsLockState, kIOHIDParamConnectType, kIOMainPortDefault,
+    IOHIDGetModifierLockState, IOHIDSetModifierLockState, IOObjectRelease, IOServiceClose,
+    IOServiceGetMatchingService, IOServiceMatching, IOServiceOpen, kIOHIDCapsLockState,
+    kIOHIDParamConnectType, kIOMainPortDefault,
 };
 
 struct HidSystem(u32);
@@ -14,13 +15,18 @@ impl HidSystem {
         // dictionary's owned reference, including when no service is found.
         let matching = unsafe { IOServiceMatching(c"IOHIDSystem".as_ptr()) }
             .context("Could not create IOHIDSystem matching dictionary")?;
+        // A mutable CF dictionary is also a CFDictionary; transfer its ownership.
+        let matching = unsafe { CFRetained::cast_unchecked(matching) };
         let service = unsafe { IOServiceGetMatchingService(kIOMainPortDefault, Some(matching)) };
         ensure!(service != 0, "Failed to find IOHIDSystem");
         let mut connection = 0;
+        // libc's deprecated accessor still exposes the platform's mach_task_self
+        // macro; keep this one ABI lookup local instead of adding a Mach crate.
+        #[allow(deprecated)]
+        let task = unsafe { libc::mach_task_self() };
         // SAFETY: service is an owned IOKit handle; the output points to live storage.
-        let result = unsafe {
-            IOServiceOpen(service, libc::mach_task_self(), kIOHIDParamConnectType, &mut connection)
-        };
+        let result =
+            unsafe { IOServiceOpen(service, task, kIOHIDParamConnectType, &mut connection) };
         IOObjectRelease(service);
         ensure!(result == 0, "IOServiceOpen failed: {:#010x}", result as u32);
         Ok(Self(connection))
@@ -29,16 +35,23 @@ impl HidSystem {
     fn read(&self) -> Result<bool> {
         let mut enabled = false;
         // SAFETY: the connection stays open and the output is a valid bool pointer.
-        let result = unsafe {
-            IOHIDGetModifierLockState(self.0, kIOHIDCapsLockState as i32, &mut enabled)
-        };
-        ensure!(result == 0, "IOHIDGetModifierLockState failed: {:#010x}", result as u32);
+        let result =
+            unsafe { IOHIDGetModifierLockState(self.0, kIOHIDCapsLockState as i32, &mut enabled) };
+        ensure!(
+            result == 0,
+            "IOHIDGetModifierLockState failed: {:#010x}",
+            result as u32
+        );
         Ok(enabled)
     }
 
     fn write(&self, enabled: bool) -> Result<()> {
         let result = IOHIDSetModifierLockState(self.0, kIOHIDCapsLockState as i32, enabled);
-        ensure!(result == 0, "IOHIDSetModifierLockState failed: {:#010x}", result as u32);
+        ensure!(
+            result == 0,
+            "IOHIDSetModifierLockState failed: {:#010x}",
+            result as u32
+        );
         Ok(())
     }
 }

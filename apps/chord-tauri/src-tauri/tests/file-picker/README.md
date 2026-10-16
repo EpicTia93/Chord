@@ -1,6 +1,7 @@
 # Native file-picker listener
 
-From the repository root, compile the production listener and check AppKit's
+The fixture and production listener are Rust, using typed Apple framework
+bindings. From the repository root, compile them and check AppKit's
 nonlocalized Open/Save identifiers:
 
 ```sh
@@ -12,11 +13,12 @@ executable needs Accessibility access and an active desktop session. It returns
 77 when permission is unavailable; it never prompts or changes permissions.
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer bun apps/chord-tauri/src-tauri/tests/file-picker/verify.ts --ui
+cargo run --manifest-path apps/chord-tauri/src-tauri/Cargo.toml --example file-picker -- --ui
 ```
 
-Use a matching Xcode compiler and SDK. The explicit `DEVELOPER_DIR` above also
-avoids mismatched Command Line Tools installations.
+The Bun entry point accepts `--ui` too. The fixture is an opt-in Cargo example,
+so ordinary test runs do not initialize AppKit or display windows. No
+C/Objective-C compiler step is needed.
 
 The fixture verifies an unrelated alert remains inactive, a native Open sheet
 activates the listener, switching to another document clears it, returning to the
@@ -27,3 +29,13 @@ there is a single overall timeout and no polling loop. Every panel is canceled.
 
 Rust's `file_picker_tests` cover scope priority, fallback, deduplication,
 preservation of the actual foreground app, and the protected core namespace.
+
+Keyboard lifecycle tests live in `caps_listener.rs`, including exclusive/denied
+devices, duplicate matches, unplug/replug, and panic containment. The ignored
+`native_listener_stops_and_restarts` and `reads_native_caps_lock_without_changing_it`
+tests exercise the real IOKit APIs without posting input or toggling Caps Lock:
+
+```sh
+cargo test --manifest-path apps/chord-tauri/src-tauri/Cargo.toml --lib native_listener_stops_and_restarts -- --ignored
+cargo test --manifest-path apps/chord-tauri/src-tauri/Cargo.toml --lib reads_native_caps_lock_without_changing_it -- --ignored
+```

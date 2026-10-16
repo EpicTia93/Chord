@@ -2,39 +2,56 @@
 use crate::app::AppHandleExt;
 use crate::state::AppPermissionsState;
 use anyhow::Result;
-use std::sync::{Arc, OnceLock};
+use objc2::MainThreadMarker;
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{Arc, OnceLock},
+};
 use tauri::{AppHandle, Manager};
 
-static HANDLE: OnceLock<AppHandle> = OnceLock::new();
+mod native;
 
-unsafe extern "C" {
-    fn chord_file_picker_set_enabled(enabled: bool, changed: extern "C" fn(bool));
-}
-
-extern "C" fn changed(active: bool) {
-    // Never unwind through an AppKit/AX callback, including if a subscriber panics.
-    let _ = std::panic::catch_unwind(|| {
-        if let Some(handle) = HANDLE.get() {
-            if let Err(error) = handle
-                .app_state()
-                .frontmost()
-                .set_file_picker_active(active)
-            {
-                log::error!("Failed to update file picker context: {error:#}");
-            }
-        }
-    });
+thread_local! {
+    static LISTENER: RefCell<Option<Rc<native::Listener>>> = const { RefCell::new(None) };
 }
 
 fn set_enabled(handle: &AppHandle, enabled: bool) -> Result<()> {
-    handle.run_on_main_thread(move || unsafe {
-        chord_file_picker_set_enabled(enabled, changed);
+    let callback_handle = handle.clone();
+    handle.run_on_main_thread(move || {
+        let Some(main_thread) = MainThreadMarker::new() else {
+            return;
+        };
+        if enabled {
+            LISTENER.with(|slot| {
+                if slot.borrow().is_none() {
+                    let listener = native::Listener::start(main_thread, move |active| {
+                        if let Err(error) = callback_handle
+                            .app_state()
+                            .frontmost()
+                            .set_file_picker_active(active)
+                        {
+                            log::error!("Failed to update file picker context: {error:#}");
+                        }
+                    });
+                    *slot.borrow_mut() = Some(listener);
+                }
+            });
+        } else {
+            // Drop outside the RefCell borrow: Drop publishes the inactive state.
+            drop(LISTENER.with(|slot| slot.borrow_mut().take()));
+            let _ = callback_handle
+                .app_state()
+                .frontmost()
+                .set_file_picker_active(false);
+        }
     })?;
     Ok(())
 }
 
 pub(super) fn init(handle: AppHandle) -> Result<()> {
-    if HANDLE.set(handle.clone()).is_err() {
+    static INITIALIZED: OnceLock<()> = OnceLock::new();
+    if INITIALIZED.set(()).is_err() {
         return Ok(());
     }
     let permissions =
