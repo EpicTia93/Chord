@@ -14,7 +14,7 @@
 		"@chord/dev.improve.chord.routes.settings._components.command-line-card": "workspace:*",
 		"@chord/dev.improve.chord.routes.settings._components.permissions-card": "workspace:*",
 		"@chord/dev.improve.chord.routes.settings._components.quit-chord-card": "workspace:*",
-		"react": "^19.3.0"
+		"react": "^19.3.1"
 	},
 	"devDependencies": {
 		"@types/react": "^19.3.0",

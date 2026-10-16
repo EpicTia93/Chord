@@ -11,7 +11,7 @@
 	"dependencies": {
 		"@chord/com.npmjs.react-resizable-panels": "workspace:*",
 		"@chord/com.npmjs.utils-cn": "workspace:*",
-		"react": "^19.3.0"
+		"react": "^19.3.1"
 	},
 	"devDependencies": {
 		"@types/react": "^19.3.0",

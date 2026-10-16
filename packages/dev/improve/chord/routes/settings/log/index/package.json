@@ -12,8 +12,8 @@
     "@chord/dev.improve.chord.api.taurpc": "workspace:*",
     "@chord/dev.improve.chord.components.ui.button": "workspace:*",
     "@chord/dev.improve.chord.routes.settings._components.log-stream": "workspace:*",
-    "lucide-react": "^1.55.0",
-    "react": "^19.3.0"
+    "lucide-react": "^1.57.0",
+    "react": "^19.3.1"
   },
   "devDependencies": {
     "@types/react": "^19.3.0",

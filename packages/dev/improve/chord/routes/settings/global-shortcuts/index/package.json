@@ -19,8 +19,8 @@
 		"@chord/dev.improve.chord.routes.settings._components.app-icon": "workspace:*",
 		"@chord/dev.improve.chord.routes.settings._components.shortcut-keys": "workspace:*",
 		"@chord/dev.improve.chord.lib.typeshare": "workspace:*",
-		"lucide-react": "^1.55.0",
-		"react": "^19.3.0"
+		"lucide-react": "^1.57.0",
+		"react": "^19.3.1"
 	},
 	"devDependencies": {
 		"@types/react": "^19.3.0",

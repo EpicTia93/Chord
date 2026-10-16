@@ -15,7 +15,7 @@
 		"@chord/dev.improve.chord.lib.state": "workspace:*",
 		"@chord/dev.improve.chord.routes.settings._components.active-chords-tree": "workspace:*",
 		"@chord/dev.improve.chord.lib.typeshare": "workspace:*",
-		"react": "^19.3.0"
+		"react": "^19.3.1"
 	},
 	"devDependencies": {
 		"@types/react": "^19.3.0",

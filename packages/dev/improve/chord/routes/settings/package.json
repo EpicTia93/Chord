@@ -15,9 +15,9 @@
 		"@chord/dev.improve.chord.components.ui.sidebar": "workspace:*",
 		"@chord/dev.improve.chord.routes.settings._components.log-stream": "workspace:*",
 		"@chord/dev.improve.chord.routes.settings._components.permissions-dialog": "workspace:*",
-		"@tauri-apps/api": "^2.12.3",
-		"lucide-react": "^1.55.0",
-		"react": "^19.3.0"
+		"@tauri-apps/api": "^2.12.4",
+		"lucide-react": "^1.57.0",
+		"react": "^19.3.1"
 	},
 	"devDependencies": {
 		"@types/react": "^19.3.0",

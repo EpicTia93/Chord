@@ -14,7 +14,7 @@
 		"@chord/dev.improve.chord.components.ui.input": "workspace:*",
 		"@chord/dev.improve.chord.components.ui.textarea": "workspace:*",
 		"class-variance-authority": "^0.7.1",
-		"react": "^19.3.0"
+		"react": "^19.3.1"
 	},
 	"devDependencies": {
 		"@types/react": "^19.3.0",

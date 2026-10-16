@@ -17,8 +17,8 @@
     "@chord/dev.improve.chord.components.ui.input": "workspace:*",
     "@chord/dev.improve.chord.lib.state": "workspace:*",
     "@chord/dev.improve.chord.lib.typeshare": "workspace:*",
-    "lucide-react": "^1.55.0",
-    "react": "^19.3.0"
+    "lucide-react": "^1.57.0",
+    "react": "^19.3.1"
   },
   "devDependencies": {
     "@types/react": "^19.3.0",

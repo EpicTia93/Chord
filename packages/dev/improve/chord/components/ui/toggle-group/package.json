@@ -12,8 +12,8 @@
 		"@chord/com.npmjs.utils-cn": "workspace:*",
 		"@chord/dev.improve.chord.components.ui.toggle": "workspace:*",
 		"class-variance-authority": "^0.7.1",
-		"radix-ui": "^1.8.0",
-		"react": "^19.3.0"
+		"radix-ui": "^1.8.1",
+		"react": "^19.3.1"
 	},
 	"devDependencies": {
 		"@types/react": "^19.3.0",

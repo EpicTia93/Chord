@@ -14,7 +14,7 @@
 		"@chord/dev.improve.chord.api.taurpc": "workspace:*",
 		"@chord/dev.improve.chord.components.ui.button": "workspace:*",
 		"@chord/dev.improve.chord.components.ui.input": "workspace:*",
-		"react": "^19.3.0"
+		"react": "^19.3.1"
 	},
 	"devDependencies": {
 		"@types/react": "^19.3.0",

@@ -10,9 +10,9 @@
 	},
 	"dependencies": {
 		"@chord/dev.improve.chord.components.ui.button": "workspace:*",
-		"@tauri-apps/plugin-opener": "^2.7.1",
-		"lucide-react": "^1.55.0",
-		"react": "^19.3.0"
+		"@tauri-apps/plugin-opener": "^2.7.2",
+		"lucide-react": "^1.57.0",
+		"react": "^19.3.1"
 	},
 	"devDependencies": {
 		"@types/react": "^19.3.0",

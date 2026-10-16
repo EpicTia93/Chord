@@ -3,6 +3,6 @@
   "type": "module",
   "exports": "./+.ts",
   "dependencies": {
-    "react-resizable-panels": "^4.14.4"
+    "react-resizable-panels": "^4.14.5"
   }
 }

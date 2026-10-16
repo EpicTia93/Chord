@@ -18,9 +18,9 @@
 		"@chord/dev.improve.chord.components.ui.skeleton": "workspace:*",
 		"@chord/dev.improve.chord.components.ui.tooltip": "workspace:*",
 		"class-variance-authority": "^0.7.1",
-		"lucide-react": "^1.55.0",
-		"radix-ui": "^1.8.0",
-		"react": "^19.3.0"
+		"lucide-react": "^1.57.0",
+		"radix-ui": "^1.8.1",
+		"react": "^19.3.1"
 	},
 	"devDependencies": {
 		"@types/react": "^19.3.0",
