@@ -18,8 +18,8 @@ const BUFFER_REFERENCE = /^\\[1-9]$/;
 
 /**
  * Typed escapes never expand on their own: Tab replaces the escape with the
- * `active` suggestion. Numbered buffers expand as soon as their digit is typed,
- * so Tab skips them.
+ * `active` suggestion. Macro references expand as soon as they are complete (a
+ * buffer's digit or a named macro's closing `=`), so Tab skips numbered buffers.
  */
 export function getEscapeSuggestions(tokens: string[], macros: ChordMacroEntry[]) {
   const start = tokens.lastIndexOf("\\");

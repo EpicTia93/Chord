@@ -5,7 +5,7 @@ use crate::app::chord_runner::release_chord_sequences;
 use crate::app::state::AppSingleton;
 use crate::models::{
     ChordEventTrigger, ChordInputEvent, ChordKeyboardEvent, ChordMacroName, ChordMacros, Key,
-    KeyEvent, MetaChordCommand, expand_typed_buffer, select_escape,
+    KeyEvent, MetaChordCommand, expand_typed_reference, select_escape,
 };
 use crate::state::{
     ChordExecutionObservable, ChordInputObservable, ChordInputState, ChordMacrosObservable,
@@ -270,7 +270,7 @@ impl ChordInputManager {
                 self.dispatch_current_buffer(&press_triggers, &event)?;
             }
             KeyEvent::Press(Key(KeyMappingCode::Tab)) => {
-                // Typed escapes other than numbered buffers expand only on Tab.
+                // Typed escapes other than complete macro references expand only on Tab.
                 let state = self.observable.get_state()?;
                 let selected = select_escape(&state.input, &self.sequence.lock().macros)?;
                 if let Some(input) = selected {
@@ -610,20 +610,17 @@ impl ChordInputManager {
         next_key_buffer
     }
 
-    /// A numbered buffer reference expands as soon as its digit is typed.
-    fn expand_typed_digit(&self, input: Vec<Key>, key: &Key) -> Vec<Key> {
-        if !key.is_digit() {
-            return input;
-        }
-        expand_typed_buffer(&input, &self.sequence.lock().macros).unwrap_or(input)
+    /// A macro reference expands as soon as the key that completes it is typed.
+    fn expand_typed_reference(&self, input: Vec<Key>) -> Vec<Key> {
+        expand_typed_reference(&input, &self.sequence.lock().macros).unwrap_or(input)
     }
 
     fn handle_unshifted_key_press(&self, key: &Key, event: &ChordKeyboardEvent) -> Result<()> {
         let state = self.observable.get_state()?;
-        let next_key_buffer = self.expand_typed_digit(
-            Self::next_key_buffer_for_unshifted_press(&state.input, key),
-            key,
-        );
+        let mut next_key_buffer = Self::next_key_buffer_for_unshifted_press(&state.input, key);
+        if next_key_buffer.len() > state.input.len() {
+            next_key_buffer = self.expand_typed_reference(next_key_buffer);
+        }
         self.edit_buffer(
             next_key_buffer,
             state.quotes,
@@ -740,7 +737,7 @@ impl ChordInputManager {
             sequence.pop();
         }
         sequence.push(*key);
-        let sequence = self.expand_typed_digit(sequence, key);
+        let sequence = self.expand_typed_reference(sequence);
         let dispatch = match self.resolve_dispatch(
             &sequence,
             &quotes,

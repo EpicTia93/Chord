@@ -6,6 +6,7 @@ use crate::models::{
     ChordEventTrigger, ChordInputEvent, ChordKeyboardEvent, ChordMacroName, ChordMacros,
     ChordRepeat, ChordRunConfig, ChordStep, ChordTaskAction, Key, MetaChordCommand,
     TypeChordAction, has_pending_escape, is_core_chords_file, serialize_with_quotes,
+    undefined_reference,
 };
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
@@ -152,7 +153,9 @@ impl ChordSequence {
             }
             ChordCommand::Pending => {
                 let error = triggers.contains(&ChordEventTrigger::Input).then(|| {
-                    if has_pending_escape(&raw_event.input) {
+                    if let Some(reference) = undefined_reference(&raw_event.input, &self.macros) {
+                        format!("`{reference}` references an undefined macro")
+                    } else if has_pending_escape(&raw_event.input) {
                         "Press Tab to expand the escape".into()
                     } else {
                         "Incomplete or invalid chord".into()
@@ -1195,6 +1198,18 @@ name = "fixture"
             escape.error.as_deref(),
             Some("Press Tab to expand the escape")
         );
+        // Typing expands every defined macro reference, so one that stays is undefined.
+        for (input, error) in [
+            (r"/w\=nope=", r"`\=nope=` references an undefined macro"),
+            (r"\4", r"`\4` references an undefined macro"),
+        ] {
+            let undefined = sequence
+                .dispatch_command(typed(input), &[ChordEventTrigger::Input], None, |e| {
+                    contexts(&package, e)
+                })
+                .unwrap();
+            assert_eq!(undefined.error.as_deref(), Some(error), "{input}");
+        }
         let core = core_fixture(include_str!(concat!(
             env!("OUT_DIR"),
             "/chords-chord.macos.toml"

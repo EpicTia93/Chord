@@ -227,7 +227,7 @@ impl ChordMacros {
 mod tests {
     use super::*;
     use crate::models::{
-        ChordCommand, ChordRepeat, ChordRunConfig, ChordStep, Key, expand_typed_buffer,
+        ChordCommand, ChordRepeat, ChordRunConfig, ChordStep, Key, expand_typed_reference,
         select_escape,
     };
 
@@ -430,7 +430,7 @@ mod tests {
         // Tab inlines a named macro; typing a buffer's digit inlines the buffer.
         let mut input = select_escape(&typed(r"\=rep"), &macros).unwrap().unwrap();
         input.extend(typed(r"\1"));
-        let input = expand_typed_buffer(&input, &macros).unwrap();
+        let input = expand_typed_reference(&input, &macros).unwrap();
         assert_eq!(
             ChordCommand::parse(&input, &[], &macros).unwrap(),
             ChordCommand::Run {
