@@ -35,8 +35,8 @@ for (const layout of [ChordLayout.SidebarLeft, ChordLayout.FloatingBottom]) {
     expect(html).toContain("Escape suggestions");
     expect(html).toContain("1720x864");
     expect(html).toContain("800x600");
-    expect(html.indexOf("\\1")).toBeLessThan(html.indexOf("\\=window-size="));
-    expect(html.indexOf("\\=window-size=")).toBeLessThan(html.indexOf("\\up"));
+    expect(html.indexOf("\\1")).toBeLessThan(html.indexOf("\\window-size="));
+    expect(html.indexOf("\\window-size=")).toBeLessThan(html.indexOf("\\up"));
   });
 
   test(`${layout} keeps failed input on screen in red with its error`, () => {

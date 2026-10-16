@@ -34,6 +34,13 @@ export function withQuoteTexts(tokens: string[], quotes: string[], inserting: bo
 	return result;
 }
 
+/** Whether `next` only drops keys or quote text from the end of `previous`, as Backspace does. */
+export function isDeletionOf(next: string[], previous: string[]) {
+	const nextText = next.join('\0');
+	const previousText = previous.join('\0');
+	return nextText.length < previousText.length && previousText.startsWith(nextText);
+}
+
 export interface CommandPrefix {
 	/** Leading repeat-count digits. */
 	count: string[];

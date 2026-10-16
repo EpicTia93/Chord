@@ -1201,6 +1201,7 @@ name = "fixture"
         // Typing expands every defined macro reference, so one that stays is undefined.
         for (input, error) in [
             (r"/w\=nope=", r"`\=nope=` references an undefined macro"),
+            (r"/w\nope=", r"`\nope=` references an undefined macro"),
             (r"\4", r"`\4` references an undefined macro"),
         ] {
             let undefined = sequence
@@ -1441,7 +1442,11 @@ name = "fixture"
         save_macro(&mut sequence, &core, r"0=window-dimensions=\1");
         sequence.reset();
         // A typed named reference waits for Tab, even after its closing delimiter.
-        for input in [r"/wd\=window-dimensions", r"/wd\=window-dimensions="] {
+        for input in [
+            r"/wd\=window-dimensions",
+            r"/wd\=window-dimensions=",
+            r"/wd\window-dimensions=",
+        ] {
             let dispatch = sequence
                 .dispatch_command(
                     typed(input),
@@ -1452,10 +1457,10 @@ name = "fixture"
                 .unwrap();
             assert!(dispatch.tasks.is_empty() && dispatch.input_event.is_none());
         }
-        for raw in (1..=9)
-            .map(|digit| typed(&format!(r"/wd\{digit}")))
-            .chain([tab(&sequence, r"/wd\=window-d")])
-        {
+        for raw in (1..=9).map(|digit| typed(&format!(r"/wd\{digit}"))).chain([
+            tab(&sequence, r"/wd\=window-d"),
+            tab(&sequence, r"/wd\window-d"),
+        ]) {
             let dispatch = sequence
                 .dispatch_command(
                     raw.clone(),
@@ -1496,6 +1501,7 @@ name = "fixture"
         for (input, expected) in [
             (typed(r"0h\2"), MetaChordCommand::Halt(12)),
             (tab(&sequence, r"\=pref"), MetaChordCommand::Settings),
+            (tab(&sequence, r"\pref"), MetaChordCommand::Settings),
         ] {
             let dispatch = sequence
                 .dispatch_command(input, &[ChordEventTrigger::Input], None, |e| {

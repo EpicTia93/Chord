@@ -1,4 +1,5 @@
 use super::Key;
+use super::key::SPECIAL_KEY_SEQUENCES;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -16,6 +17,15 @@ pub enum ChordMacroName {
 impl ChordMacroName {
     pub fn is_persistent(&self) -> bool {
         matches!(self, Self::Named(name) if !name.starts_with(|c: char| c.is_ascii_digit()))
+    }
+
+    /// The reference text always reads as this macro: the leading `=` of `\=name=`
+    /// keeps any name from reading as a special key or a numbered buffer.
+    pub(crate) fn reference(&self) -> String {
+        match self {
+            Self::Buffer(digit) => format!(r"\{digit}"),
+            Self::Named(name) => format!(r"\={name}="),
+        }
     }
 
     fn validate(&self) -> Result<()> {
@@ -50,20 +60,34 @@ pub struct ChordMacros {
     definitions: HashMap<ChordMacroName, String>,
 }
 
-/// A numbered reference consumes two characters. A named reference requires a
-/// closing `=`, which is consumed along with the name.
+/// A numbered reference consumes two characters. A named reference, `\name=` or
+/// `\=name=`, requires a closing `=`, which is consumed along with the name. Typed
+/// keys parse references this way: special-key escapes only apply on Tab.
 pub(crate) fn parse_macro_reference(input: &str) -> Option<(ChordMacroName, usize)> {
     let escaped = input.strip_prefix('\\')?;
     if let Some(digit @ b'1'..=b'9') = escaped.as_bytes().first() {
         return Some((ChordMacroName::Buffer(digit - b'0'), 2));
     }
-    let named = escaped.strip_prefix('=')?;
+    let named = escaped.strip_prefix('=').unwrap_or(escaped);
     let end = named.find('=')?;
     let name = &named[..end];
     if name.is_empty() || name.contains('\\') {
         return None;
     }
-    Some((ChordMacroName::Named(name.to_owned()), 3 + end))
+    let opening = input.len() - named.len();
+    Some((ChordMacroName::Named(name.to_owned()), opening + end + 1))
+}
+
+/// In text, special-key escapes win: `\notes=` is Enter followed by `otes=`, so a
+/// name starting with `n`, `up`, `left`, `down`, or `right` needs its leading `=`.
+pub(crate) fn parse_text_macro_reference(input: &str) -> Option<(ChordMacroName, usize)> {
+    if SPECIAL_KEY_SEQUENCES
+        .iter()
+        .any(|(token, _)| input.starts_with(token))
+    {
+        return None;
+    }
+    parse_macro_reference(input)
 }
 
 impl ChordMacros {
@@ -163,7 +187,7 @@ impl ChordMacros {
     pub fn resolve_named(&self, mut input: &str) -> Result<Option<String>> {
         let mut output = String::new();
         while !input.is_empty() {
-            let length = match parse_macro_reference(input) {
+            let length = match parse_text_macro_reference(input) {
                 Some((ChordMacroName::Named(_), length)) => {
                     let Some(expanded) = self.expand(&input[..length])? else {
                         return Ok(None);
@@ -194,7 +218,7 @@ impl ChordMacros {
         remaining_expansions: &mut usize,
     ) -> Result<bool> {
         while !input.is_empty() {
-            if let Some((name, length)) = parse_macro_reference(input) {
+            if let Some((name, length)) = parse_text_macro_reference(input) {
                 anyhow::ensure!(
                     *remaining_expansions > 0,
                     "chord exceeds 4096 macro expansions"
@@ -230,6 +254,7 @@ mod tests {
         ChordCommand, ChordRepeat, ChordRunConfig, ChordStep, Key, expand_typed_reference,
         select_escape,
     };
+    use keycode::KeyMappingCode;
 
     fn named(name: &str) -> ChordMacroName {
         ChordMacroName::Named(name.into())
@@ -372,6 +397,7 @@ mod tests {
         for input in [
             r"\1\2\3\4\5\6\7\8\9",
             r"/wd\=window-dimensions=",
+            r"/wd\window-dimensions=",
             r"a\=name=b",
             r"\=1=",
         ] {
@@ -384,14 +410,20 @@ mod tests {
             r"\==",
             r"\=name\1",
             r"\=name",
+            r"\size",
             r"/wd\=window-dimensions",
+            r"/wd\window-dimensions",
         ] {
             assert!(Key::parse_sequence(input).is_err(), "{input}");
         }
         let mut macros = ChordMacros::default();
         macros.set(ChordMacroName::Buffer(1), "1720x864".into());
         macros.set(named("window-dimensions"), r"\1".into());
-        for input in [r"/wd\1", r"/wd\=window-dimensions="] {
+        for input in [
+            r"/wd\1",
+            r"/wd\=window-dimensions=",
+            r"/wd\window-dimensions=",
+        ] {
             assert_eq!(
                 macros.expand(input).unwrap().as_deref(),
                 Some("/wd1720x864")
@@ -413,6 +445,27 @@ mod tests {
         );
         macros.set(ChordMacroName::Buffer(1), String::new());
         assert_eq!(macros.expand(r"a\1b").unwrap().as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn special_keys_win_over_short_named_references_in_text() {
+        let mut macros = ChordMacros::default();
+        macros.set(named("notes"), "x".into());
+        macros.set(named("up-twice"), r"\up\up".into());
+        // Enter followed by `/wd=1`, not a reference to a macro named `n/wd`.
+        for input in [r"/w]\n/w]\n/wd=1", r"\notes=", r"\up-twice="] {
+            assert_eq!(macros.expand(input).unwrap().as_deref(), Some(input));
+            assert_eq!(macros.resolve_named(input).unwrap().as_deref(), Some(input));
+            Key::parse_sequence(input).unwrap();
+        }
+        assert_eq!(
+            Key::parse_sequence(r"\notes=").unwrap()[..2],
+            [Key(KeyMappingCode::Enter), Key(KeyMappingCode::KeyO)]
+        );
+        assert_eq!(
+            macros.expand(r"\=notes=\=up-twice=").unwrap().as_deref(),
+            Some(r"x\up\up")
+        );
     }
 
     #[test]
@@ -509,13 +562,17 @@ mod tests {
                 .as_deref(),
             Some(r"/wd800x600\1\up\n")
         );
+        assert_eq!(
+            macros.resolve_named(r"/wd\size=\1").unwrap().as_deref(),
+            Some(r"/wd800x600\1")
+        );
         assert_eq!(macros.resolve_named(r"a\=missing=").unwrap(), None);
     }
 
     #[test]
     fn undefined_references_stay_pending_and_recursive_or_huge_expansions_fail() {
         let mut macros = ChordMacros::default();
-        for input in [r"a\1", r"a\=missing=", r"a\=missing", r"a\="] {
+        for input in [r"a\1", r"a\=missing=", r"a\missing=", r"a\=missing", r"a\="] {
             // Physical typing also permits an incomplete trailing escape.
             let keys = input
                 .chars()

@@ -17,9 +17,21 @@ export interface EscapeSuggestion {
 const BUFFER_REFERENCE = /^\\[1-9]$/;
 
 /**
+ * `\name=` works when typed, but `\1`–`\9` are buffers and text reads `\n`, `\up`, … as
+ * keys, so names starting with those keep the leading `=` that works everywhere.
+ */
+export function namedMacroReference(name: string) {
+  const short = `\\${name}=`;
+  return /^[1-9]/.test(name) || SPECIAL_KEY_SUGGESTIONS.some(({ reference }) => short.startsWith(reference))
+    ? `\\=${name}=`
+    : short;
+}
+
+/**
  * Typed escapes never expand on their own: Tab replaces the escape with the
- * `active` suggestion. Macro references expand as soon as they are complete (a
- * buffer's digit or a named macro's closing `=`), so Tab skips numbered buffers.
+ * `active` suggestion, a special key spelled exactly or else the first match. Macro
+ * references expand as soon as they are complete (a buffer's digit or a named
+ * macro's closing `=`, with or without its leading `=`), so Tab skips buffers.
  */
 export function getEscapeSuggestions(tokens: string[], macros: ChordMacroEntry[]) {
   const start = tokens.lastIndexOf("\\");
@@ -28,6 +40,7 @@ export function getEscapeSuggestions(tokens: string[], macros: ChordMacroEntry[]
   // A numbered buffer reference is complete, even when more keys follow.
   if (/^[1-9]$/.test(suffix[1] ?? "")) return null;
   const prefix = suffix.join("").toLowerCase();
+  const namePrefix = prefix.slice(1).replace(/^=/, "");
   const macroSuggestions = [...macros]
     .sort((left, right) => {
       if (left.target.type !== right.target.type) return left.target.type === "buffer" ? -1 : 1;
@@ -35,13 +48,19 @@ export function getEscapeSuggestions(tokens: string[], macros: ChordMacroEntry[]
       const [a, b] = [String(left.target.value), String(right.target.value)];
       return a < b ? -1 : a > b ? 1 : 0;
     })
+    .filter((macro) =>
+      macro.target.type === "buffer"
+        ? `\\${macro.target.value}`.startsWith(prefix)
+        : `${macro.target.value}=`.startsWith(namePrefix),
+    )
     .map((macro): EscapeSuggestion => ({
       reference:
-        macro.target.type === "buffer" ? `\\${macro.target.value}` : `\\=${macro.target.value}=`,
+        macro.target.type === "buffer"
+          ? `\\${macro.target.value}`
+          : namedMacroReference(macro.target.value),
       description: macro.sequence || "(empty sequence)",
       kind: "macro",
-    }))
-    .filter((suggestion) => suggestion.reference.startsWith(prefix));
+    }));
   const suggestions = [
     ...macroSuggestions,
     ...SPECIAL_KEY_SUGGESTIONS.filter((suggestion) => suggestion.reference.startsWith(prefix)),
@@ -49,7 +68,9 @@ export function getEscapeSuggestions(tokens: string[], macros: ChordMacroEntry[]
   return {
     prefix,
     suggestions,
-    active: suggestions.find((suggestion) => !BUFFER_REFERENCE.test(suggestion.reference))
-      ?.reference,
+    active: (
+      SPECIAL_KEY_SUGGESTIONS.find((suggestion) => suggestion.reference === prefix) ??
+      suggestions.find((suggestion) => !BUFFER_REFERENCE.test(suggestion.reference))
+    )?.reference,
   };
 }

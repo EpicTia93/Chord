@@ -39,3 +39,14 @@ test("buffers edit Enter key presses as lines of a multiline field", () => {
   expect(field?.[1]).toBe("3`d2,i5`ab\ncd");
   expect(html).toMatch(/<textarea[^>]*id="macro-buffer-2"[^>]*rows="1"/);
 });
+
+test("named macros show the shortest reference that works when typed and in macro text", () => {
+  const html = render([
+    { target: { type: "named", value: "size" }, sequence: "1720x864", persistent: true },
+    { target: { type: "named", value: "notes" }, sequence: "x", persistent: true },
+    { target: { type: "named", value: "1temporary" }, sequence: "y", persistent: false },
+  ]);
+  expect(html).toContain(">\\size=</code>");
+  expect(html).toContain(">\\=notes=</code>");
+  expect(html).toContain(">\\=1temporary=</code>");
+});

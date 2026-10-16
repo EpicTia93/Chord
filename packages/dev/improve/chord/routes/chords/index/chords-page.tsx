@@ -3,7 +3,7 @@ import { cn } from '@chord/com.npmjs.utils-cn';
 import { Kbd } from '@chord/dev.improve.chord.components.ui.kbd';
 import { StateQueries, useChordExecutionState, useChordInputState, useChordMacrosState, useChordPackageManagerState, useChordPanelState, useFrontmostState, useKeyboardState } from '@chord/dev.improve.chord.lib.state';
 import { emit, listen } from '@tauri-apps/api/event';
-import { getCommandLabel, getCommandPrefix, getRangeHint, normalizeChordTokens, normalizeToken, withQuoteTexts } from '#chord-tokens';
+import { getCommandLabel, getCommandPrefix, getRangeHint, isDeletionOf, normalizeChordTokens, normalizeToken, withQuoteTexts } from '#chord-tokens';
 import { getEscapeSuggestions } from '#chord-suggestions';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
@@ -151,7 +151,10 @@ export function ChordsPageContent({
 	const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
 	const [surfaceVersion, setSurfaceVersion] = useState(0);
 	const surfaceRef = useRef<HTMLDivElement>(null);
+	const floatingBarRef = useRef<HTMLDivElement>(null);
 	const floatingKeysRef = useRef<HTMLDivElement>(null);
+	/** The widest the floating bar has been while the current buffer was typed. */
+	const floatingWidthFloorRef = useRef<{ tokens: string[], width: number } | null>(null);
 
 	const emitSurfaceRect = useCallback(() => {
 		const surface = surfaceRef.current;
@@ -424,6 +427,23 @@ export function ChordsPageContent({
 		},
 	);
 
+	// Typing never narrows the floating bar, even when the description shortens;
+	// it may shrink again after Backspace or once the buffer clears.
+	useLayoutEffect(() => {
+		const bar = floatingBarRef.current;
+		const surface = surfaceRef.current;
+		if (!bar || !surface) {
+			return;
+		}
+
+		const typedTokens = isFloating && normalizedBufferTokens.length > 0 ? floatingDisplayTokens : null;
+		const floor = floatingWidthFloorRef.current;
+		bar.style.minWidth = typedTokens && floor && !isDeletionOf(typedTokens, floor.tokens)
+			? `min(${floor.width}px, 100% - 1.5rem)`
+			: '';
+		floatingWidthFloorRef.current = typedTokens && { tokens: typedTokens, width: surface.getBoundingClientRect().width };
+	});
+
 	useLayoutEffect(() => {
 		emitSurfaceRect();
 	}, [currentPrefixLength, keyColumns.length, keySize, rowGap, descriptionFontSize, chordPanelState.isVisible, emitSurfaceRect]);
@@ -437,7 +457,7 @@ export function ChordsPageContent({
 
 	return (
 		<div className="relative size-full bg-transparent">
-			<div className={isFloating ? 'absolute bottom-3 left-1/2 w-max min-w-40 max-w-[calc(100%_-_1.5rem)] -translate-x-1/2' : 'absolute left-0 top-1/2 -translate-y-1/2'}>
+			<div ref={floatingBarRef} className={isFloating ? 'absolute bottom-3 left-1/2 w-max min-w-40 max-w-[calc(100%_-_1.5rem)] -translate-x-1/2' : 'absolute left-0 top-1/2 -translate-y-1/2'}>
 				<div
 					key={surfaceVersion}
 					ref={surfaceRef}

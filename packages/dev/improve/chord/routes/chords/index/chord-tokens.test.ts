@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { getCommandLabel, getCommandPrefix, getRangeHint, normalizeChordTokens, withQuoteTexts } from '#chord-tokens';
+import { getCommandLabel, getCommandPrefix, getRangeHint, isDeletionOf, normalizeChordTokens, withQuoteTexts } from '#chord-tokens';
 
 const tokens = (input: string) => normalizeChordTokens([...input].map(c => (c === '⏎' ? 'Enter' : c)));
 const prefixTokens = (input: string) => getCommandPrefix(tokens(input)).tokens;
@@ -61,4 +61,16 @@ test('typed quotes show their insert-mode text, including the open one', () => {
 	// Text notation keeps its keys, and a `'` inside a chord is an ordinary key.
 	expect(withQuoteTexts(tokens("'hi'"), [], false)).toEqual(["'", 'H', 'I', "'"]);
 	expect(withQuoteTexts(tokens("ab'"), [], false)).toEqual(['A', 'B', "'"]);
+});
+
+test('Backspace deletes keys and quote text, while typing and expansions do not', () => {
+	expect(isDeletionOf(tokens('/w'), tokens('/w]'))).toBe(true);
+	expect(isDeletionOf([], tokens('a'))).toBe(true);
+	expect(isDeletionOf(["'", 'Hi'], ["'", 'Hi!'])).toBe(true);
+	expect(isDeletionOf(tokens('/w]'), tokens('/w]'))).toBe(false);
+	expect(isDeletionOf(tokens('/w]'), tokens('/w'))).toBe(false);
+	expect(isDeletionOf(["'", 'Hi!'], ["'", 'Hi'])).toBe(false);
+	// Tab and typed references replace the escape instead of shortening the buffer.
+	expect(isDeletionOf(tokens('a/w]'), tokens('a\\1'))).toBe(false);
+	expect(isDeletionOf(tokens('a↑'), tokens('a\\up'))).toBe(false);
 });

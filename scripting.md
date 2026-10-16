@@ -144,18 +144,28 @@ For example, `0b11720x864` saves `1720x864` in buffer 1, and `/wd\1` then execut
 the same chord as `/wd1720x864`.
 
 For a named macro, use `0=<name>=<sequence>`. For example, after
-`0=window-dimensions=1720x864`, typing `/wd\=win` and pressing Tab enters
-`/wd1720x864`. Tab inserts the macro's complete expansion, so later redefinitions do
-not change input that was already entered. In TOML or CLI text, a complete named
-reference such as `a\=window-dimensions=b` expands to `a1720x864b`. Names can
+`0=window-dimensions=1720x864`, typing `/wd\window-dimensions=` enters `/wd1720x864`
+as soon as the closing `=` is typed, and typing `/wd\win` and pressing Tab does the
+same. Both insert the macro's complete expansion, so later redefinitions do not
+change input that was already entered. In TOML or CLI text, a complete named
+reference such as `a\window-dimensions=b` expands to `a1720x864b`. Names can
 contain normal chord characters except `=` and backslash; they do not have to be
 identifiers.
-The named macro `\=1=` is separate from numbered buffer `\1`.
+
+A named reference may also start with `=`, as in `\=window-dimensions=`. That form
+is required when the name starts with a digit 1–9, because `\1`–`\9` are numbered
+buffers: the named macro `\=1=` is separate from buffer `\1`. In text, special-key
+escapes win, so `\notes=` is Enter followed by `otes=`; write `\=notes=` there
+for a name starting with `n`, `up`, `left`, `down`, or `right`. Typed special keys
+only apply on Tab, so typing `\notes=` always references the macro. When a special
+key is typed exactly, such as `\n` or `\up`, Tab enters that key rather than a
+longer macro name.
 
 Typing `\` in chord mode shows matching macros and their saved sequences before
 special-key escapes. Suggestions narrow as you type, including inside a longer
-chord such as `/wd\=win`. Both overlay layouts show these suggestions and highlight
-the one Tab inserts: the first named macro or special key that matches.
+chord such as `/wd\win`. Both overlay layouts show these suggestions and highlight
+the one Tab inserts: a special key typed exactly, otherwise the first named macro or
+special key that matches.
 
 Named macros persist across app restarts by default. Prefix a name with any digit
 to make it temporary: `0=1window-dimensions=1720x864` defines `\=1window-dimensions=` for the

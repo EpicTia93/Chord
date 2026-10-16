@@ -16,8 +16,10 @@ test("line breaks in the editor are Enter key presses in the stored sequence", (
 });
 
 test("other escapes and references are untouched", () => {
-  const sequence = "\\up\\left\\down\\right\\1\\=name=\\=n=\\n'a\\nb'";
-  expect(sequenceToText(sequence)).toBe("\\up\\left\\down\\right\\1\\=name=\\=n=\n'a\nb'");
+  const sequence = "\\up\\left\\down\\right\\1\\=name=\\=n=\\size=\\n'a\\nb'";
+  expect(sequenceToText(sequence)).toBe(
+    "\\up\\left\\down\\right\\1\\=name=\\=n=\\size=\n'a\nb'",
+  );
   expect(textToSequence(sequenceToText(sequence))).toBe(sequence);
 });
 

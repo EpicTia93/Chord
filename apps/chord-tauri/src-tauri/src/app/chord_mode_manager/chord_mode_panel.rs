@@ -20,9 +20,7 @@ use tauri_nspanel::{CollectionBehavior, PanelBuilder, PanelHandle, PanelLevel, S
 use tauri_plugin_store::StoreExt;
 use window_vibrancy::NSVisualEffectViewTagged;
 
-const INDICATOR_WIDTH: u32 = 640;
-const FLOATING_WIDTH: f64 = 480.0;
-const FLOATING_HEIGHT: f64 = 120.0;
+const INDICATOR_WIDTH: f64 = 640.0;
 const FLOATING_BOTTOM_MARGIN: f64 = 24.0;
 const LAYOUT_STORE_KEY: &str = "chordLayout";
 const NATIVE_SURFACE_TAG: NSInteger = 91376255;
@@ -169,25 +167,22 @@ impl ChordModePanel {
     }
 
     fn frame_for_layout(layout: ChordLayout, visible_frame: NSRect) -> NSRect {
-        let width = match layout {
-            ChordLayout::SidebarLeft => INDICATOR_WIDTH as f64,
-            ChordLayout::FloatingBottom => FLOATING_WIDTH,
-        }
-        .min(visible_frame.size.width);
         match layout {
             ChordLayout::SidebarLeft => NSRect::new(
                 visible_frame.origin,
-                NSSize::new(width, visible_frame.size.height),
+                NSSize::new(
+                    INDICATOR_WIDTH.min(visible_frame.size.width),
+                    visible_frame.size.height,
+                ),
             ),
+            // The transparent panel spans the display above the margin, so the
+            // webview can size and center the floating bar to fit its keys,
+            // description, and suggestions.
             ChordLayout::FloatingBottom => {
-                let height = FLOATING_HEIGHT.min(visible_frame.size.height);
-                let margin = FLOATING_BOTTOM_MARGIN.min(visible_frame.size.height - height);
+                let margin = FLOATING_BOTTOM_MARGIN.min(visible_frame.size.height);
                 NSRect::new(
-                    NSPoint::new(
-                        visible_frame.origin.x + (visible_frame.size.width - width) / 2.0,
-                        visible_frame.origin.y + margin,
-                    ),
-                    NSSize::new(width, height),
+                    NSPoint::new(visible_frame.origin.x, visible_frame.origin.y + margin),
+                    NSSize::new(visible_frame.size.width, visible_frame.size.height - margin),
                 )
             }
         }
@@ -441,12 +436,22 @@ mod tests {
         );
         assert_eq!(
             ChordModePanel::frame_for_layout(ChordLayout::FloatingBottom, screen),
-            NSRect::new(NSPoint::new(-1120.0, 104.0), NSSize::new(480.0, 120.0))
+            NSRect::new(NSPoint::new(-1600.0, 104.0), NSSize::new(1440.0, 876.0))
         );
         let small = NSRect::new(NSPoint::new(0.0, -100.0), NSSize::new(320.0, 100.0));
-        for layout in [ChordLayout::SidebarLeft, ChordLayout::FloatingBottom] {
-            assert_eq!(ChordModePanel::frame_for_layout(layout, small), small);
-        }
+        assert_eq!(
+            ChordModePanel::frame_for_layout(ChordLayout::SidebarLeft, small),
+            small
+        );
+        assert_eq!(
+            ChordModePanel::frame_for_layout(ChordLayout::FloatingBottom, small),
+            NSRect::new(NSPoint::new(0.0, -76.0), NSSize::new(320.0, 76.0))
+        );
+        let tiny = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(320.0, 10.0));
+        assert_eq!(
+            ChordModePanel::frame_for_layout(ChordLayout::FloatingBottom, tiny),
+            NSRect::new(NSPoint::new(0.0, 10.0), NSSize::new(320.0, 0.0))
+        );
     }
 
     #[test]

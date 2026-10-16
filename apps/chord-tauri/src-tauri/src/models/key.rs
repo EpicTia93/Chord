@@ -689,9 +689,9 @@ impl Key {
                 .iter()
                 .find(|(token, _)| remaining.starts_with(token))
                 .map(|(token, _)| token.len())
-                .or_else(|| super::parse_macro_reference(remaining).map(|(_, length)| length))
+                .or_else(|| super::parse_text_macro_reference(remaining).map(|(_, length)| length))
                 .ok_or_else(|| anyhow::anyhow!(
-                    "invalid special-key escape in chord sequence {sequence:?}: expected \\up, \\left, \\down, \\right, \\n, \\1–\\9, or \\=<name>="
+                    "invalid special-key escape in chord sequence {sequence:?}: expected \\up, \\left, \\down, \\right, \\n, \\1–\\9, or \\<name>="
                 ))?;
             remaining = &remaining[length..];
         }

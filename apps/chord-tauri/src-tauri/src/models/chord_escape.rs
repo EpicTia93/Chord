@@ -1,6 +1,7 @@
-//! Typed backslash escapes. A macro reference, `\1`–`\9` or `\=name=`, expands as
-//! soon as its last key is typed. Every other escape stays exactly as typed until Tab
-//! replaces it with its active expansion; those never expand on their own.
+//! Typed backslash escapes. A macro reference, `\1`–`\9` or `\name=` (also
+//! `\=name=`), expands as soon as its last key is typed. Every other escape stays
+//! exactly as typed until Tab replaces it with its active expansion; those never
+//! expand on their own, so a typed `\notes=` is always a macro reference.
 
 use super::key::SPECIAL_KEY_SEQUENCES;
 use super::{ChordMacroName, ChordMacros, Key, parse_macro_reference};
@@ -33,11 +34,11 @@ pub fn expand_typed_reference(input: &[Key], macros: &ChordMacros) -> Option<Vec
         .iter()
         .map(Key::to_sequence_char)
         .collect::<Option<String>>()?;
-    let (_, length) = parse_macro_reference(&typed)?;
+    let (name, length) = parse_macro_reference(&typed)?;
     if length != typed.len() {
         return None;
     }
-    let sequence = macros.expand(&typed).ok()??;
+    let sequence = macros.expand(&name.reference()).ok()??;
     let expanded = Key::parse_sequence(&sequence).ok()?;
     Some([&input[..start], &expanded].concat())
 }
@@ -52,9 +53,8 @@ pub fn undefined_reference(input: &[Key], macros: &ChordMacros) -> Option<String
                 .iter()
                 .map_while(Key::to_sequence_char)
                 .collect::<String>();
-            let (_, length) = parse_macro_reference(&typed)?;
-            let reference = &typed[..length];
-            matches!(macros.expand(reference), Ok(None)).then(|| reference.to_owned())
+            let (name, length) = parse_macro_reference(&typed)?;
+            matches!(macros.expand(&name.reference()), Ok(None)).then(|| typed[..length].to_owned())
         })
 }
 
@@ -83,26 +83,36 @@ pub fn expand_typed_input(input: &[Key], macros: &ChordMacros) -> Result<Option<
     Ok(Some(output))
 }
 
-/// References Tab can select, in suggestion order: named macros, then special keys.
-fn references(macros: &ChordMacros) -> impl Iterator<Item = (String, Option<ChordMacroName>)> {
+/// The reference Tab selects for a typed escape: the special key it spells exactly,
+/// else the first named macro, then special key, whose reference starts with what
+/// was typed. Named macros match with or without the leading `=`.
+fn active_reference(typed: &str, macros: &ChordMacros) -> Option<String> {
+    let keys = SPECIAL_KEY_SEQUENCES.iter().map(|(token, _)| *token);
+    if let Some(token) = keys.clone().find(|token| *token == typed) {
+        return Some(token.to_owned());
+    }
+    let escaped = typed.strip_prefix('\\')?;
+    let name_prefix = escaped.strip_prefix('=').unwrap_or(escaped);
     let named = macros
         .entries()
         .into_iter()
-        .filter_map(|entry| match entry.target {
-            ChordMacroName::Named(name) => {
-                Some((format!(r"\={name}="), Some(ChordMacroName::Named(name))))
+        .filter_map(|entry| match &entry.target {
+            ChordMacroName::Named(name) if format!("{name}=").starts_with(name_prefix) => {
+                Some(entry.target.reference())
             }
-            ChordMacroName::Buffer(_) => None,
+            _ => None,
         });
-    let keys = SPECIAL_KEY_SEQUENCES
-        .iter()
-        .map(|(token, _)| ((*token).to_owned(), None));
-    named.chain(keys)
+    named
+        .chain(
+            keys.filter(|token| token.starts_with(typed))
+                .map(str::to_owned),
+        )
+        .next()
 }
 
-/// Replaces the escape at the end of `input` with the first expansion whose
-/// reference starts with what was typed, as Tab does. A named macro inserts its
-/// complete expansion. Returns `None` when nothing matches.
+/// Replaces the escape at the end of `input` with its active expansion, as Tab
+/// does. A named macro inserts its complete expansion. Returns `None` when nothing
+/// matches.
 pub fn select_escape(input: &[Key], macros: &ChordMacros) -> Result<Option<Vec<Key>>> {
     let Some(start) = input
         .iter()
@@ -118,9 +128,7 @@ pub fn select_escape(input: &[Key], macros: &ChordMacros) -> Result<Option<Vec<K
     else {
         return Ok(None);
     };
-    let Some((reference, _)) =
-        references(macros).find(|(reference, _)| reference.starts_with(&typed))
-    else {
+    let Some(reference) = active_reference(&typed, macros) else {
         return Ok(None);
     };
     let Some(sequence) = macros.expand(&reference)? else {
@@ -161,6 +169,7 @@ mod tests {
             r"a\n",
             r"\=size=",
             r"\=size=b",
+            r"\size=",
             r"\1\up",
         ] {
             assert!(has_pending_escape(&typed(input)), "{input}");
@@ -189,7 +198,9 @@ mod tests {
         macros.set(ChordMacroName::Buffer(3), r"\3".into());
         macros.set(ChordMacroName::Named("size".into()), r"\2x".into());
         macros.set(ChordMacroName::Named("1x".into()), "c".into());
-        macros.set(ChordMacroName::Named("broken".into()), r"\=missing=".into());
+        macros.set(ChordMacroName::Named("broken".into()), r"\missing=".into());
+        macros.set(ChordMacroName::Named("notes".into()), "d".into());
+        macros.set(ChordMacroName::Named("up-twice".into()), r"\up\up".into());
         let expand = |input: &str| {
             expand_typed_reference(&typed(input), &macros)
                 .map(|keys| Key::serialize_sequence(&keys).unwrap())
@@ -198,7 +209,11 @@ mod tests {
             (r"3\1", r"3a\up"),
             (r"\u\2", r"\ua\upb"),
             (r"3\=size=", r"3a\upbx"),
+            (r"3\size=", r"3a\upbx"),
             (r"\=1x=", "c"),
+            // Typed special keys only apply on Tab, so these names need no leading `=`.
+            (r"a\notes=", "ad"),
+            (r"\up-twice=", r"\up\up"),
         ] {
             assert_eq!(expand(input).as_deref(), Some(expected), "{input}");
         }
@@ -214,10 +229,16 @@ mod tests {
             r"\=",
             r"\==",
             r"\=size",
+            r"\size",
             r"\=1",
             r"\=size=x",
+            r"\size=x",
             r"\=nope=",
+            r"\nope=",
             r"\=broken=",
+            r"\broken=",
+            // `\1` is buffer 1, so a name starting with 1–9 needs its leading `=`.
+            r"\1x=",
         ] {
             assert_eq!(expand(input), None, "{input}");
         }
@@ -226,10 +247,14 @@ mod tests {
             Some(r"\=broken=")
         );
         assert_eq!(
+            undefined_reference(&typed(r"a\size\broken=\4"), &macros).as_deref(),
+            Some(r"\broken=")
+        );
+        assert_eq!(
             undefined_reference(&typed(r"\up\4"), &macros).as_deref(),
             Some(r"\4")
         );
-        for input in [r"\=size=", r"\=size", r"\3", r"\u"] {
+        for input in [r"\=size=", r"\size=", r"\=size", r"\notes=", r"\3", r"\u"] {
             assert_eq!(undefined_reference(&typed(input), &macros), None, "{input}");
         }
     }
@@ -264,17 +289,27 @@ mod tests {
             (r"/ws\=win", "/ws800x600"),
             (r"/ws\=window-size=", "/ws800x600"),
             (r"/ws\=w", "/ws1720x864"),
+            (r"/ws\win", "/ws800x600"),
+            (r"/ws\w", "/ws1720x864"),
             (r"\=", r"\up\up"),
+            (r"\", r"\up\up"),
             (r"\=u", r"\up\up"),
-            (r"\u", r"\up"),
+            (r"\u", r"\up\up"),
+            (r"\1\u", r"\1\up\up"),
+            // A special key spelled exactly wins over longer macro names.
+            (r"\up", r"\up"),
             (r"\n", r"\n"),
-            (r"\1\u", r"\1\up"),
+            (r"\l", r"\left"),
         ] {
             assert_eq!(select(input, &macros).as_deref(), Some(expected), "{input}");
         }
         assert_eq!(select(r"\upt", &macros), None);
+        macros.set(ChordMacroName::Named("notes".into()), "x".into());
+        assert_eq!(select(r"\n", &macros).as_deref(), Some(r"\n"));
+        assert_eq!(select(r"\no", &macros).as_deref(), Some("x"));
         // A macro that cannot expand yet is not inserted.
-        macros.set(ChordMacroName::Named("broken".into()), r"\=missing=".into());
+        macros.set(ChordMacroName::Named("broken".into()), r"\missing=".into());
         assert_eq!(select(r"\=b", &macros), None);
+        assert_eq!(select(r"\b", &macros), None);
     }
 }

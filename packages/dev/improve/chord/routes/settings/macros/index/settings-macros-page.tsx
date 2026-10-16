@@ -33,8 +33,10 @@ export function MacrosContent({ entries }: { entries: ChordMacroEntry[] }) {
         <CardHeader>
           <CardTitle>Named Macros</CardTitle>
           <CardDescription>
-            Expand a macro with <code>{"\\=name="}</code>. Names starting with a digit clear when
-            Chord restarts; other names are saved. <EnterHint />
+            Expand a macro with <code>{"\\name="}</code>. Names starting with 1–9, or with n, up,
+            left, down, or right in macro text, need the leading <code>=</code> of{" "}
+            <code>{"\\=name="}</code>. Names starting with a digit clear when Chord restarts; other
+            names are saved. <EnterHint />
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -137,7 +139,7 @@ function NamedMacroEditor({ entry, onDone }: { entry?: ChordMacroEntry; onDone?:
       </div>
       {name && (
         <p className="text-xs text-muted-foreground">
-          <code>{`\\=${name}=`}</code> ·{" "}
+          <code>{reference({ type: "named", value: name })}</code> ·{" "}
           {/^[0-9]/.test(name)
             ? "Temporary — clears on restart"
             : "Persistent — saved across restarts"}
@@ -312,8 +314,15 @@ function SequencePreview({ sequence }: { sequence: string }) {
   );
 }
 
+/**
+ * As in the chord overlay's suggestions: `\name=`, except names that `\1`–`\9` or, in
+ * text, the special keys `\n`, `\up`, `\left`, `\down`, and `\right` would claim.
+ */
 function reference(target: ChordMacroName) {
-  return target.type === "buffer" ? `\\${target.value}` : `\\=${target.value}=`;
+  if (target.type === "buffer") return `\\${target.value}`;
+  return /^(?:[1-9]|n|up|left|down|right)/.test(target.value)
+    ? `\\=${target.value}=`
+    : `\\${target.value}=`;
 }
 
 function MacroError({ error }: { error: unknown }) {

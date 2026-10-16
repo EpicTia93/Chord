@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { ChordMacroEntry } from "@chord/dev.improve.chord.lib.typeshare";
-import { getEscapeSuggestions } from "#chord-suggestions";
+import { getEscapeSuggestions, namedMacroReference } from "#chord-suggestions";
 import { normalizeChordTokens } from "#chord-tokens";
 
 const macros: ChordMacroEntry[] = [
@@ -20,7 +20,7 @@ test("backslash suggests defined macros first, followed by special keys", () => 
     "\\1",
     "\\9",
     "\\=1temporary=",
-    "\\=window-size=",
+    "\\window-size=",
     "\\up",
     "\\left",
     "\\down",
@@ -49,7 +49,7 @@ test("backslash suggests defined macros first, followed by special keys", () => 
 
 test("suggestions narrow as an escape is typed anywhere in the input", () => {
   expect(suggest("/ws\\=win")!.suggestions.map((item) => item.reference)).toEqual([
-    "\\=window-size=",
+    "\\window-size=",
   ]);
   expect(suggest("12/ws\\=1")!.suggestions.map((item) => item.reference)).toEqual([
     "\\=1temporary=",
@@ -59,7 +59,7 @@ test("suggestions narrow as an escape is typed anywhere in the input", () => {
   expect(suggest("\\=missing")!.suggestions).toEqual([]);
   expect(suggest("\\=")!.suggestions.map((item) => item.reference)).toEqual([
     "\\=1temporary=",
-    "\\=window-size=",
+    "\\window-size=",
   ]);
   // Real key-code input follows the same path as the displayed chord tokens.
   expect(
@@ -73,7 +73,7 @@ test("only numbered buffers complete without Tab; other escapes keep suggesting"
     expect(suggest(input)).toBeNull();
   }
   for (const [input, active] of [
-    ["\\=window-size=", "\\=window-size="],
+    ["\\window-size=", "\\window-size="],
     ["a\\up", "\\up"],
     ["a\\n", "\\n"],
   ] as const) {
@@ -89,10 +89,44 @@ test("only numbered buffers complete without Tab; other escapes keep suggesting"
   expect(getEscapeSuggestions(normalizeChordTokens(["ArrowUp"]), macros)).toBeNull();
   expect(getEscapeSuggestions(normalizeChordTokens(["KeyA", "Enter"]), macros)).toBeNull();
   expect(suggest("\\=window-size=a\\=win")!.suggestions.map((item) => item.reference)).toEqual([
-    "\\=window-size=",
+    "\\window-size=",
   ]);
   expect(suggest("\\1\\")!.suggestions[0]!.reference).toBe("\\1");
   expect(suggest("\\1\\")!.active).toBe("\\=1temporary=");
+});
+
+test("named macros match with or without the leading = and show the shortest portable reference", () => {
+  for (const input of ["/ws\\win", "/ws\\=win", "\\window-size="]) {
+    expect(suggest(input)!.suggestions.map((item) => item.reference)).toEqual(["\\window-size="]);
+  }
+  expect(suggest("\\1temp")).toBeNull();
+  expect(namedMacroReference("size")).toBe("\\size=");
+  expect(namedMacroReference("0size")).toBe("\\0size=");
+  // Buffers and, in text, special keys would claim these names without the leading `=`.
+  for (const name of ["1temporary", "notes", "n", "up-twice", "leftmost", "down", "right2"]) {
+    expect(namedMacroReference(name)).toBe(`\\=${name}=`);
+  }
+  for (const name of ["u", "lef", "do", "rig", "size"]) {
+    expect(namedMacroReference(name)).toBe(`\\${name}=`);
+  }
+});
+
+test("a special key spelled exactly stays active over longer macro names", () => {
+  const entries: ChordMacroEntry[] = [
+    { target: { type: "named", value: "notes" }, sequence: "x", persistent: true },
+    { target: { type: "named", value: "up-twice" }, sequence: "\\up\\up", persistent: true },
+  ];
+  expect(suggest("\\n", entries)!.suggestions.map((item) => item.reference)).toEqual([
+    "\\=notes=",
+    "\\n",
+  ]);
+  expect(suggest("\\n", entries)!.active).toBe("\\n");
+  expect(suggest("\\up", entries)!.active).toBe("\\up");
+  expect(suggest("\\no", entries)!.active).toBe("\\=notes=");
+  expect(suggest("\\u", entries)!.active).toBe("\\=up-twice=");
+  expect(suggest("\\=n", entries)!.suggestions.map((item) => item.reference)).toEqual([
+    "\\=notes=",
+  ]);
 });
 
 test("suggestions reflect current definitions without retaining deleted macros", () => {
