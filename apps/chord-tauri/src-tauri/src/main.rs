@@ -49,6 +49,12 @@ enum Commands {
         #[arg(value_name = "ENCODED_ARG", allow_hyphen_values = true, num_args = 1..)]
         encoded_args: Vec<String>,
     },
+    /// Internal launchd agent that restores the Caps key if Chord crashes.
+    #[command(name = "__caps-guardian", hide = true)]
+    CapsGuardian {
+        #[arg(long)]
+        state: PathBuf,
+    },
     /// Internal crash-isolated package runtime.
     #[command(name = "__package-worker", hide = true)]
     PackageWorker { address: String, token: String },
@@ -72,6 +78,19 @@ enum Commands {
 }
 
 fn main() {
+    // launchd runs the guardian from wherever the app was; it must not join a
+    // development snapshot's log streams or hold its runtime lease.
+    #[cfg(target_os = "macos")]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "__caps-guardian")
+    {
+        if let Some(Commands::CapsGuardian { state }) = Cli::parse().command {
+            exit_on_error(chords_lib::run_caps_guardian(&state));
+        }
+        return;
+    }
+
     #[cfg(target_os = "macos")]
     if let Err(error) = chords_lib::dev_runtime::initialize_stdio() {
         eprintln!("Failed to connect development log streams: {error:#}");
@@ -123,6 +142,9 @@ fn main() {
                 eprintln!("{error:#}");
                 std::process::exit(1);
             }
+        }
+        Some(Commands::CapsGuardian { .. }) => {
+            exit_on_error(Err(anyhow::anyhow!("the Caps guardian runs only on macOS")));
         }
         Some(Commands::ElevatedExec { encoded_args }) => {
             exit_on_error(run_elevated_exec(encoded_args));

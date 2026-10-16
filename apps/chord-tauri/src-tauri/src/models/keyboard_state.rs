@@ -33,11 +33,6 @@ impl AppKeyboardState {
         self.is_caps_pressed.load(Ordering::SeqCst)
     }
 
-    /// Mirrors the physical Caps Lock key as reported by the HID listener.
-    pub fn set_caps_pressed(&self, pressed: bool) {
-        self.is_caps_pressed.store(pressed, Ordering::SeqCst);
-    }
-
     pub fn is_shift_pressed(&self) -> bool {
         self.is_shift_pressed.load(Ordering::SeqCst)
     }

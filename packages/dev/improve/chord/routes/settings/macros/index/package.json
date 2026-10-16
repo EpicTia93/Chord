@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "imports": {
+    "#macro-sequence-text": "./macro-sequence-text.ts",
     "#settings-macros-page": "./settings-macros-page.tsx"
   },
   "exports": {
@@ -15,6 +16,7 @@
     "@chord/dev.improve.chord.components.ui.button": "workspace:*",
     "@chord/dev.improve.chord.components.ui.card": "workspace:*",
     "@chord/dev.improve.chord.components.ui.input": "workspace:*",
+    "@chord/dev.improve.chord.components.ui.textarea": "workspace:*",
     "@chord/dev.improve.chord.lib.state": "workspace:*",
     "@chord/dev.improve.chord.lib.typeshare": "workspace:*",
     "lucide-react": "^1.57.0",
@@ -22,6 +24,7 @@
   },
   "devDependencies": {
     "@types/react": "^19.3.0",
-    "@types/react-dom": "^19.3.0"
+    "@types/react-dom": "^19.3.0",
+    "react-dom": "^19.3.1"
   }
 }

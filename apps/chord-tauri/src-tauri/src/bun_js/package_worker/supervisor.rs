@@ -391,6 +391,7 @@ export default function(label) {{
                 sequence_id: None,
                 assign_to: None,
                 keyboard_event: None,
+                focused_window_id: None,
             },
             app_id: None,
             count: 1,

@@ -73,36 +73,92 @@ receive the underlying command as `this.input`, excluding the repeat prefix. Loo
 iterations share their initialization values until halted. Iterations are sequential,
 with a 10 ms pause between them so immediate actions leave time for other input.
 
+A repeated or looped chord calls its built handler once per iteration; the builder
+(the module's default export) still runs only when the configuration loads. Chord
+selects the focused window once, when the completed input starts running, and passes it
+to every iteration and every chord of the run as `this.focusedWindowId`. Use it, rather
+than reading focus inside the handler, for actions that target a window: `3/ws]` then
+moves one window three Spaces even though focus moves to another window after the first
+move. Handlers that should follow focus, such as window cycling, can ignore it.
+
+A config block in backticks may follow the repeat count, or start the input on its
+own. It holds comma-separated options whose digits count hundreds of milliseconds:
+
+- `d` (delay) takes one digit and waits that long once, before the first run. Loops and
+  repeats never wait for it again. `` `d5`ab `` executes `ab` after 500 ms, whatever
+  chord `ab` is.
+- `i` (interval) takes one digit per pause between consecutive runs: `` 3`i5`ab ``
+  executes `ab` three times, 500 ms apart. Several digits are used in order and repeat,
+  and `0` executes the next chord immediately.
+
+`` 3`d2,i130`/ws] `` waits 200 ms, executes `/ws]`, waits 100 ms, executes it again,
+waits 300 ms, and executes it a third time. The final `0` only matters in a loop. Each
+option appears at most once, in either order. Only a leading block is config; a
+backtick later in the input is an ordinary key. Unclosed, unknown, or repeated
+options stay pending.
+
+After a repeat count or config block, Enter separates consecutive chords.
+`` 3`i13`/w]⏎/w] `` (⏎ is the Enter key, `\n` in text) executes `/w]`, waits 100 ms,
+executes `/w]` again, waits 300 ms, and repeats that sequence three times; `1ab⏎cd`
+loops `ab` then `cd`. Everywhere else Enter is an ordinary key: it enters the chord
+buffer and triggers can contain it. Every chord in a sequence
+must resolve before anything runs, and each one keeps its own initialization values.
+Loops, configured delays or intervals, and multi-chord sequences run in the background
+with a halt ID, like loops; a plain repeat count such as `12ab` still runs in one
+action. Halting during the delay cancels the run before anything executes. Handlers
+target the window that was focused when the input completed, even after a delay.
+
+A quote types text into the focused app instead of running a chord. Typing `'` at
+the start of a step enters insert mode, similar to Vim. Chord stays active, so
+you can release Space and type any text, including capitals (with Shift or Caps
+Lock), spaces, symbols, Enter, and `'`. Caps Lock toggles as usual while
+inserting; returning to chord mode turns it off again, and leaving Chord restores
+the Caps Lock state from before Chord started. No key reaches other apps, and Backspace edits the text. Press
+Caps+Space to close the quote and return to chord mode with Space held, or Esc to
+cancel Chord and discard the whole input. After closing, continue the input as
+usual: release Space to run it, or add a config block such as `` `i1` `` to type
+one character every 100 ms (the same digits as above; without a block the text
+is typed immediately). A quote's block takes only `i`; delay the whole input instead,
+as in `` `d5`'hi' ``. A quote can stand alone, follow a repeat count (`3'hi'`),
+or be one step of an Enter-separated sequence (`` 2`i5`'hi'⏎/w] ``). Backspace
+over a closing quote reopens it in insert mode with its text. Elsewhere `'` is an
+ordinary key. Text is typed with a US keyboard layout. In TOML and CLI text
+notation, `'hello'` writes the keys between the quotes, unshifted.
+
 Backslash introduces special-key notation: `\up`, `\left`, `\down`, and `\right`
-represent arrow keys in TOML triggers and CLI sequences. For example, `'a\up'`
-matches `a` followed by the Up arrow, or the typed escape sequence. Backslash is
-reserved for special keys and macro references; bare or unknown escapes cannot
-define chords or help hints. While typing an escape, the input stays pending until the special key is
-complete. Inside parenthesized regex sections, backslash keeps its regex meaning
+represent arrow keys, and `\n` represents Enter, in TOML triggers and CLI sequences.
+For example, `'a\up'` matches `a` followed by the Up arrow. In chord mode, a typed
+escape never expands on its own: `\up` stays three keys, and the input stays pending,
+until Tab replaces it with the highlighted suggestion. Any unambiguous prefix works,
+so `\u` then Tab enters the Up arrow, as does `\up` then Tab. Numbered buffer
+references (`\1`–`\9`) are the exception and need no Tab. Backslash is reserved for
+special keys and macro references; bare or unknown escapes cannot define chords or
+help hints. Inside parenthesized regex sections, backslash keeps its regex meaning
 (for example, `(\d+)`). Use literal TOML strings (single quotes) to preserve
 backslashes. Backspace continues to edit the chord buffer.
 
 ### Macros and temporary buffers
 
 Complete `0b<digit><sequence>` to save a sequence in one of nine numbered buffers.
-For example, `0b11720x864` saves `1720x864` in buffer 1, and `/ws\1` then executes
-the same chord as `/ws1720x864`.
+For example, `0b11720x864` saves `1720x864` in buffer 1, and `/wd\1` then executes
+the same chord as `/wd1720x864`.
 
-For a named macro, use `0=<name>=<sequence>`. For example,
-`0=window-size=1720x864` makes `/ws\=window-size=` equivalent to `/ws1720x864`.
-Every named reference requires a closing `=`, including at the end of the input.
-More keys can follow it: `a\=window-size=b` expands to `a1720x864b`. Names can
+For a named macro, use `0=<name>=<sequence>`. For example, after
+`0=window-dimensions=1720x864`, typing `/wd\=win` and pressing Tab enters
+`/wd1720x864`. Tab inserts the macro's complete expansion, so later redefinitions do
+not change input that was already entered. In TOML or CLI text, a complete named
+reference such as `a\=window-dimensions=b` expands to `a1720x864b`. Names can
 contain normal chord characters except `=` and backslash; they do not have to be
 identifiers.
 The named macro `\=1=` is separate from numbered buffer `\1`.
 
 Typing `\` in chord mode shows matching macros and their saved sequences before
-arrow-key escapes. Suggestions narrow as you type, including inside a longer
-chord such as `/ws\=win`. Both overlay layouts show these suggestions; named
-references still require their closing `=`.
+special-key escapes. Suggestions narrow as you type, including inside a longer
+chord such as `/wd\=win`. Both overlay layouts show these suggestions and highlight
+the one Tab inserts: the first named macro or special key that matches.
 
 Named macros persist across app restarts by default. Prefix a name with any digit
-to make it temporary: `0=1window-size=1720x864` defines `\=1window-size=` for the
+to make it temporary: `0=1window-dimensions=1720x864` defines `\=1window-dimensions=` for the
 current session only. Numbered buffers `\1`–`\9` are always temporary. Leaving
 chord mode, clearing the input buffer, and reloading configuration preserve all
 definitions.
@@ -111,10 +167,12 @@ Settings → Macros lists the current definitions and lets you add, rename, edit
 and delete named macros or edit and clear numbered buffers. Renaming a named
 macro to start with a digit removes its saved definition; renaming it back saves
 it across restarts. Saving the same name or number overwrites its value; an empty
-sequence, such as `0b1` or `0=window-size=`, sets it to an empty expansion.
+sequence, such as `0b1` or `0=window-dimensions=`, sets it to an empty expansion.
 
-Macro bodies are saved verbatim and can reference other macros. Expansion happens
-before repeat-prefix parsing, trigger matching, and handler argument captures;
+Macro bodies are saved verbatim and can reference other macros. Numbered buffer
+references typed into a setter stay references; a named macro selected with Tab is
+inlined. Expansion happens before repeat-prefix parsing, trigger matching, and
+handler argument captures;
 handlers receive the expanded command as `this.input`. Missing references keep
 input pending. Recursive definitions and excessive expansion are rejected.
 
@@ -139,7 +197,7 @@ The event name refers to an entry in `[on]`. Every event specifier accepts an ar
 
 Chord keys are literal except for parenthesized regex sections. For example, `hs.(\d+)` matches `hs.12` and captures `12` as `$1`; the dot outside parentheses needs no backslash. Regex syntax, including escaped dots, nested groups, alternatives, and quantifiers, belongs inside the parentheses. Patterns match the entire entered sequence automatically, so no outer `^` or `$` is needed. The same rule applies to regex help hints; compact help ranges retain their special display behavior.
 
-Handlers receive the entered sequence as `this.input` (for example, `hsr12`), alongside `this.focusedAppId` and `this.event`. This also works for CLI execution.
+Handlers receive the entered sequence as `this.input` (for example, `hsr12`), alongside `this.focusedAppId`, `this.focusedWindowId`, and `this.event`. This also works for CLI execution. `this.focusedWindowId` is the Core Graphics window number (the `windowId` of `getAppWindows`) of the focused application's focused, else main, window when the completed input started running. It is `null` for callbacks that run while typing (`@init` and keyboard events) and when no window can be identified.
 
 | Trigger           | When it calls the handler                                                                     |
 | ----------------- | --------------------------------------------------------------------------------------------- |

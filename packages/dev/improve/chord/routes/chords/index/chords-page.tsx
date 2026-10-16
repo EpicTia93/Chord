@@ -3,7 +3,7 @@ import { cn } from '@chord/com.npmjs.utils-cn';
 import { Kbd } from '@chord/dev.improve.chord.components.ui.kbd';
 import { StateQueries, useChordExecutionState, useChordInputState, useChordMacrosState, useChordPackageManagerState, useChordPanelState, useFrontmostState, useKeyboardState } from '@chord/dev.improve.chord.lib.state';
 import { emit, listen } from '@tauri-apps/api/event';
-import { getRangeHint, getRepeatPrefixTokens, normalizeChordTokens, normalizeToken } from '#chord-tokens';
+import { getCommandLabel, getCommandPrefix, getRangeHint, normalizeChordTokens, normalizeToken, withQuoteTexts } from '#chord-tokens';
 import { getEscapeSuggestions } from '#chord-suggestions';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
@@ -19,15 +19,29 @@ function ChordEscapeSuggestions({ result }: { result: NonNullable<ReturnType<typ
 	const visible = result.suggestions.slice(0, MAX_ESCAPE_SUGGESTIONS);
 	return (
 		<div className="w-full min-w-72 max-w-lg border-t border-foreground/10 pt-3 text-left" aria-live="polite">
-			<p className="mb-2 text-xs font-medium text-foreground/60">Suggestions</p>
+			<p className="mb-2 text-xs font-medium text-foreground/60">Suggestions{result.active && ' · Tab inserts the highlighted one'}</p>
 			{visible.length > 0 ? <ul aria-label="Escape suggestions" className="space-y-2">
-				{visible.map(suggestion => <li key={suggestion.reference} className="flex min-w-0 items-baseline gap-3 text-sm">
-					<code className="max-w-64 shrink-0 truncate rounded-md border border-border/70 bg-background/80 px-2 py-0.5" title={suggestion.reference}>{suggestion.reference}</code>
-					<span className={cn('min-w-0 truncate text-foreground/75', suggestion.kind === 'macro' && 'font-mono')} title={suggestion.description}>{suggestion.description}</span>
-				</li>)}
+				{visible.map(suggestion => {
+					const isActive = suggestion.reference === result.active;
+					return <li key={suggestion.reference} aria-current={isActive || undefined} className="flex min-w-0 items-baseline gap-3 text-sm">
+						<code className={cn('max-w-64 shrink-0 truncate rounded-md border px-2 py-0.5', isActive ? 'border-foreground/60 bg-background font-semibold' : 'border-border/70 bg-background/80')} title={suggestion.reference}>{suggestion.reference}</code>
+						<span className={cn('min-w-0 truncate text-foreground/75', suggestion.kind === 'macro' && 'font-mono')} title={suggestion.description}>{suggestion.description}</span>
+						{isActive && <Kbd className="ml-auto shrink-0 rounded border border-border/80 px-1 text-[10px] text-foreground/70">Tab</Kbd>}
+					</li>;
+				})}
 			</ul> : <p className="text-sm text-foreground/60">No matching macros or special keys.</p>}
 			{result.suggestions.length > visible.length && <p className="mt-2 text-xs text-foreground/60">{result.suggestions.length - visible.length} more · Keep typing to narrow the list</p>}
 		</div>
+	);
+}
+
+/** The open quote's text with a caret; whitespace stays visible. */
+function InsertText({ text }: { text: string }) {
+	return (
+		<span className="whitespace-pre-wrap break-all">
+			{text}
+			<span aria-hidden className="ml-px inline-block h-[1em] w-px translate-y-[0.15em] animate-pulse bg-current" />
+		</span>
 	);
 }
 
@@ -48,14 +62,20 @@ function sortTokens(tokens: Iterable<string>) {
 function ChordKeyRow({
 	token,
 	description = '',
+	error,
 	isSelected = false,
+	isFailed = false,
 	isDimmed = false,
 	keySize,
 	descriptionFontSize,
 }: {
 	token: string
 	description?: string
+	/** Shown in place of the description. */
+	error?: string
 	isSelected?: boolean
+	/** Selected keys belong to input that failed to execute. */
+	isFailed?: boolean
 	isDimmed?: boolean
 	keySize: number
 	descriptionFontSize: number
@@ -78,13 +98,17 @@ function ChordKeyRow({
 					'shrink-0 rounded-md border font-mono shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_1px_2px_rgba(0,0,0,0.18)]',
 					token.length > 1 ? 'px-2' : 'px-0',
 					isSelected
-						? 'border-emerald-400/90 bg-emerald-100 text-emerald-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.5),0_0_0_1px_rgba(52,211,153,0.35),0_4px_10px_rgba(16,185,129,0.25)]'
+						? isFailed
+							? 'border-red-400/90 bg-red-100 text-red-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.5),0_0_0_1px_rgba(248,113,113,0.35),0_4px_10px_rgba(239,68,68,0.25)]'
+							: 'border-emerald-400/90 bg-emerald-100 text-emerald-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.5),0_0_0_1px_rgba(52,211,153,0.35),0_4px_10px_rgba(16,185,129,0.25)]'
 						: 'border-border/80 bg-background/95 text-foreground',
 				)}
 			>
 				{token}
 			</Kbd>
-			<div style={{ fontSize: `${descriptionFontSize}px` }}>{description}</div>
+			{error
+				? <div role="alert" className="line-clamp-2 max-w-80 text-red-600 dark:text-red-400" style={{ fontSize: `${descriptionFontSize}px` }}>{error}</div>
+				: <div style={{ fontSize: `${descriptionFontSize}px` }}>{description}</div>}
 		</div>
 	);
 }
@@ -267,9 +291,13 @@ export function ChordsPageContent({
 	const normalizedBufferTokens = normalizeChordTokens(chordInputState.input);
 	const escapeSuggestions = getEscapeSuggestions(normalizedBufferTokens, chordMacrosData.entries);
 	const normalizedActiveChordTokens = normalizeChordTokens(chordInputState.selectedInputEvent?.input ?? []);
+	// Failed input stays selected until the next key press, in place of an executed chord.
+	const executionError = normalizedBufferTokens.length === 0 && chordInputState.error
+		? chordInputState.error.charAt(0).toUpperCase() + chordInputState.error.slice(1)
+		: undefined;
 
 	const shouldHighlightActiveChord
-		= keyboardState.isShiftPressed
+		= (keyboardState.isShiftPressed || executionError !== undefined)
 			&& normalizedBufferTokens.length === 0
 			&& normalizedActiveChordTokens.length > 0;
 	const selectedTokens = shouldHighlightActiveChord
@@ -278,18 +306,25 @@ export function ChordsPageContent({
 	const floatingTokens = normalizedBufferTokens.length > 0
 		? normalizedBufferTokens
 		: normalizedActiveChordTokens;
+	// Typed quotes keep their text beside the keys; show it in place.
+	const floatingDisplayTokens = normalizedBufferTokens.length > 0
+		? withQuoteTexts(normalizedBufferTokens, chordInputState.quotes, chordInputState.inserting)
+		: withQuoteTexts(normalizedActiveChordTokens, chordInputState.selectedInputEvent?.quotes ?? [], false);
+	const insertText = chordInputState.inserting ? chordInputState.quotes.at(-1) ?? '' : undefined;
 	const currentPrefixLength = selectedTokens.length;
-	const repeatPrefixTokens = getRepeatPrefixTokens(selectedTokens);
+	const commandPrefix = getCommandPrefix(selectedTokens);
+	const commandPrefixTokens = commandPrefix.tokens;
+	const commandLabel = getCommandLabel(commandPrefix);
 	const builtinHints = [
 		...metaCommands,
 		...loops.map(loop => ({ sequence: haltLoopTemplate.replace('{id}', String(loop.id)), name: `Halt loop ${loop.id}: ${loop.input}` })),
 	].map(hint => ({ tokens: [...hint.sequence].map(normalizeToken), description: hint.name }));
 	const hintSequences = [
-		...baseHintSequences.map(hint => ({ ...hint, tokens: [...repeatPrefixTokens, ...hint.tokens] })),
-		...(repeatPrefixTokens.length === 0 ? builtinHints : []),
-		...(repeatPrefixTokens.length === 0 ? [{ tokens: ['1'], description: 'Loop chord' }] : []),
+		...baseHintSequences.map(hint => ({ ...hint, tokens: [...commandPrefixTokens, ...hint.tokens] })),
+		...(commandPrefixTokens.length === 0 ? builtinHints : []),
+		...(commandPrefixTokens.length === 0 ? [{ tokens: ['1'], description: 'Loop chord' }] : []),
 	];
-	const rangeHints = baseRangeHints.map(hint => getRangeHint(hint, repeatPrefixTokens));
+	const rangeHints = baseRangeHints.flatMap(hint => getRangeHint(hint, commandPrefix) ?? []);
 	const floatingHint = hintSequences.findLast(hint =>
 		hint.tokens.length === floatingTokens.length
 		&& hint.tokens.every((token, index) => floatingTokens[index] === token));
@@ -317,7 +352,7 @@ export function ChordsPageContent({
 		(_, columnIndex) => {
 			const prefixTokens = selectedTokens.slice(0, columnIndex);
 			const selectedToken = selectedTokens[columnIndex];
-			const getChordKeys = (chord: Chord) => 'keys' in chord.trigger ? [...repeatPrefixTokens, ...normalizeChordTokens(chord.trigger.keys)] : [];
+			const getChordKeys = (chord: Chord) => 'keys' in chord.trigger ? [...commandPrefixTokens, ...normalizeChordTokens(chord.trigger.keys)] : [];
 
 			const matchingChords = activeChords.filter(chord =>
 				prefixTokens.every((token, tokenIndex) => getChordKeys(chord)[tokenIndex] === token),
@@ -398,7 +433,7 @@ export function ChordsPageContent({
 		if (keys) {
 			keys.scrollLeft = keys.scrollWidth;
 		}
-	}, [chordInputState.input, chordInputState.selectedInputEvent, isFloating]);
+	}, [chordInputState.input, chordInputState.quotes, chordInputState.selectedInputEvent, isFloating]);
 
 	return (
 		<div className="relative size-full bg-transparent">
@@ -422,17 +457,19 @@ export function ChordsPageContent({
 						<div className="flex flex-col items-center gap-1.5" aria-live="polite">
 							<div ref={floatingKeysRef} className="w-full overflow-x-hidden py-0.5">
 								<div className="mx-auto flex w-max min-w-full justify-center gap-1.5">
-									{floatingTokens.length > 0 ? floatingTokens.map((token, index) => (
+									{floatingDisplayTokens.length > 0 ? floatingDisplayTokens.map((token, index) => (
 										<Kbd
 											key={`${index}-${token}`}
 											className={cn(
 												'h-7 min-w-7 shrink-0 rounded-md border px-1.5 font-mono text-sm shadow-sm',
-												normalizedBufferTokens.length === 0
-													? 'border-emerald-400/90 bg-emerald-100 text-emerald-950'
-													: 'border-border/80 bg-background/95 text-foreground',
+												normalizedBufferTokens.length > 0
+													? 'border-border/80 bg-background/95 text-foreground'
+													: executionError
+														? 'border-red-400/90 bg-red-100 text-red-950'
+														: 'border-emerald-400/90 bg-emerald-100 text-emerald-950',
 											)}
 										>
-										{token}
+										{insertText !== undefined && index === floatingDisplayTokens.length - 1 ? <InsertText text={token} /> : token}
 										</Kbd>
 								)) : (
 									<Kbd
@@ -442,15 +479,15 @@ export function ChordsPageContent({
 								)}
 								</div>
 							</div>
-							<div className="line-clamp-2 w-full text-center text-xs leading-4 text-foreground/90">
-								{floatingDescription}
-							</div>
+							{executionError
+								? <div role="alert" className="line-clamp-2 w-full text-center text-xs leading-4 text-red-600 dark:text-red-400">{executionError}</div>
+								: <div className="line-clamp-2 w-full text-center text-xs leading-4 text-foreground/90">{floatingDescription}</div>}
 							{escapeSuggestions && <ChordEscapeSuggestions result={escapeSuggestions} />}
 						</div>
 					) : <>
-						{repeatPrefixTokens.length > 0 && (
+						{commandLabel && (
 							<div className="mb-3 text-xs text-foreground/70">
-								{Number(repeatPrefixTokens.join('')) === 1 ? 'Loop chord' : `Repeat ${repeatPrefixTokens.join('')} times`}
+								{commandLabel}
 							</div>
 						)}
 						{loops.length > 0 && (
@@ -460,9 +497,18 @@ export function ChordsPageContent({
 								))}
 							</div>
 						)}
+					{insertText !== undefined ? (
+						<div aria-label="Insert mode" className="flex max-w-96 flex-col gap-2">
+							<p className="text-xs font-medium text-foreground/70">Insert mode</p>
+							<div className="min-h-8 rounded-md border border-border/80 bg-background/95 px-2 py-1 font-mono text-sm text-foreground shadow-sm">
+								<InsertText text={insertText} />
+							</div>
+							<p className="text-xs text-foreground/60">Caps+Space closes the quote · Esc cancels</p>
+						</div>
+					) : (
 					<div className="relative flex items-start">
 						<div className="flex items-start gap-6">
-							{keyColumns.map(column => (
+							{keyColumns.map((column, columnIndex) => (
 								<div
 									key={column.id}
 									className="flex flex-col items-start overflow-y-auto px-1 py-1"
@@ -480,7 +526,9 @@ export function ChordsPageContent({
 											key={`${column.id}-${row.token}`}
 											token={row.token}
 											description={row.description}
+											error={columnIndex === keyColumns.length - 1 && row.keys.includes(column.selectedToken) ? executionError : undefined}
 											isSelected={row.keys.includes(column.selectedToken)}
+											isFailed={executionError !== undefined}
 											isDimmed={column.hasSelection && !row.keys.includes(column.selectedToken)}
 											keySize={keySize}
 											descriptionFontSize={descriptionFontSize}
@@ -490,6 +538,7 @@ export function ChordsPageContent({
 							))}
 						</div>
 					</div>
+					)}
 					</>}
 				</div>
 			</div>

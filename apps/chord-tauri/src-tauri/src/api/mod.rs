@@ -29,8 +29,9 @@ pub struct ChordCommandOutput {
 #[taurpc_api(mod = "resolvers")]
 pub trait Api {
     async fn open_accessibility_settings();
-    async fn open_input_monitoring_settings();
-    async fn refresh_permissions() -> AppResult<(bool, bool)>;
+    async fn refresh_permissions() -> AppResult<bool>;
+    async fn voice_over_uses_caps_lock() -> bool;
+    async fn open_voice_over_utility();
     async fn add_git_repo(repo: String) -> AppResult<GitRepo>;
     async fn add_git_monorepo(repo: String) -> AppResult<GitRepo>;
     async fn list_monorepo_packages(source: String) -> AppResult<Vec<(String, bool)>>;

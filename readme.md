@@ -31,7 +31,15 @@ An ideal requirement for typing chords is to have all your fingers free to type 
 
 However, `Space` needs to be pressed as part of a key combination, since pressing it alone will output the actual space ` ` character. The key which makes the most sense as part of this combination is `Caps Lock`, since it's one of the easiest keys to reach yet still remains relatively unused on most layouts.
 
-Because we only use it as part of a key combination, pressing `Caps Lock` on its own will still toggle on Caps as usual, and this special behavior only applies when `Space` is pressed down while `Caps Lock` is pressed.
+Because we only use it as part of a key combination, pressing `Caps Lock` on its own will still toggle on Caps as usual, and this special behavior only applies when `Space` is pressed down while `Caps Lock` is pressed. While _Chord Mode_ is active, Caps Lock is kept off: activating it turns Caps Lock off, and pressing `Caps Lock` to run a chord never turns it on. When _Chord Mode_ ends, Caps Lock returns to whatever it was before you activated it.
+
+To make this reliable, _Chord_ takes over the `Caps Lock` key while it runs and decides every change to Caps Lock itself. A tap turns Caps Lock off as soon as you press it, but turns it on only when you release it, because until then the press could still become `Caps Lock` + `Space`. While _Chord_ runs, features that rely on macOS handling the key itself don't work:
+
+- "Use the Caps Lock key to switch to and from ABC" in Keyboard settings.
+- The Caps Lock key as the VoiceOver modifier. Set the VoiceOver modifier to `Control` + `Option` instead; _Chord_'s settings remind you when this applies.
+- Apps that read `Caps Lock` as an ordinary key, such as games or virtual machines that capture the keyboard.
+
+When _Chord_ quits, the key goes back to macOS. If _Chord_ crashes, a small background helper puts it back.
 
 </details>
 

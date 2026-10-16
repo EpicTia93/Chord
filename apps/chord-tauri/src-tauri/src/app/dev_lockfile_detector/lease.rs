@@ -3,7 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind};
 use std::path::Path;
 
-pub(super) fn is_development(bundle_id: &str) -> bool {
+pub(crate) fn is_development(bundle_id: &str) -> bool {
     bundle_id == "com.leonsilicon.chord.development"
         || bundle_id.starts_with("com.leonsilicon.chord.development.")
 }

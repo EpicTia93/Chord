@@ -13,7 +13,6 @@ export type TomlValue = any;
 
 export interface AppPermissionsState {
 	isAutostartEnabled?: boolean;
-	isInputMonitoringEnabled?: boolean;
 	isAccessibilityEnabled?: boolean;
 }
 
@@ -67,13 +66,19 @@ export interface ChordInputEvent {
 	input: ChordInput;
 	/** The ID of the application the chord execution applied to. */
 	applicationId?: string;
+	/**
+	 * Text typed in insert mode for each quote in `input`, in order. Such a quote
+	 * appears in `input` as an adjacent `''` pair.
+	 */
+	quotes: string[];
 }
 
 /** The action that a chord task is meant to execute. */
 export type ChordTaskAction = 
 	| { type: "shortcut", content: ShortcutChordAction }
 	| { type: "shell", content: ShellChordAction }
-	| { type: "handler", content: HandlerChordAction };
+	| { type: "handler", content: HandlerChordAction }
+	| { type: "type", content: TypeChordAction };
 
 export interface ChordActionTask {
 	packageName: string;
@@ -112,12 +117,24 @@ export interface ChordInputState {
 	 * of an HTML <input />'s `value`. Always cleared when executed.
 	 */
 	input: ChordInput;
+	/** Insert-mode text for each quote in `input`, in order; see `ChordInputEvent::quotes`. */
+	quotes: string[];
+	/**
+	 * `input` ends with an open quote, so keys are typed into its text instead of
+	 * the chord. Chord stays active without Space until Caps+Space closes the quote.
+	 */
+	inserting: boolean;
 	/** The chord currently being pressed down. */
 	pressedInputEvent?: ChordInputEvent;
 	/** The chord that is "active" */
 	selectedInputEvent?: ChordInputEvent;
 	/** Resolved action name for the current buffer or the last executed chord. */
 	description?: string;
+	/**
+	 * Why the selected input failed to execute. Failed input stays selected, so it is
+	 * shown like an executed chord until the next key press.
+	 */
+	error?: string;
 }
 
 export interface ChordJsPackage {
@@ -292,6 +309,12 @@ export interface HandlerChordAction {
 	sequenceId?: string;
 	assignTo?: string;
 	keyboardEvent?: ChordKeyboardEvent;
+	/**
+	 * Window focused when the completed input started running, available as
+	 * `this.focusedWindowId`. Every repetition, loop iteration, and chord in the
+	 * run receives the same window.
+	 */
+	focusedWindowId?: number;
 }
 
 export interface KeyboardState {
@@ -343,6 +366,13 @@ export interface SimulatedShortcut {
 
 export interface ShortcutChordAction {
 	simulatedShortcut: SimulatedShortcut;
+}
+
+/** Text typed into the focused app by a quoted step such as `'hello'`. */
+export interface TypeChordAction {
+	text: string;
+	/** Pauses between characters, used in order and cycled. Empty types instantly. */
+	intervalsMs: number[];
 }
 
 export enum AppModeState {

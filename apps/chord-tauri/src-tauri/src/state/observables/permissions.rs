@@ -7,7 +7,6 @@ use typeshare::typeshare;
 #[serde(rename_all = "camelCase")]
 pub struct AppPermissionsState {
     pub is_autostart_enabled: Option<bool>,
-    pub is_input_monitoring_enabled: Option<bool>,
     pub is_accessibility_enabled: Option<bool>,
 }
 

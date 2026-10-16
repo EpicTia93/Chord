@@ -4,9 +4,12 @@ pub use app::*;
 mod keyboard;
 pub use keyboard::*;
 
-mod caps_listener;
+pub(crate) mod caps_guardian;
+mod caps_hotkey;
 mod caps_lock;
-mod caps_lock_restore;
+mod caps_lock_guard;
+mod caps_remap;
 pub mod health;
 mod secure_input;
 mod tap;
+pub mod voice_over;

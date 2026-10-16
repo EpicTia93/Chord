@@ -1,11 +1,11 @@
-use super::chord_loops::{ChordLoops, run_loop};
+use super::chord_loops::{ChordLoops, run_plan, select_run_window};
 use super::chord_sequence::{ChordSequence, ChordSequenceDispatch, ChordTaskQueue};
 use crate::app::AppHandleExt;
 use crate::app::chord_runner::release_chord_sequences;
 use crate::app::state::AppSingleton;
 use crate::models::{
-    ChordEventTrigger, ChordInputEvent, ChordKeyboardEvent, ChordMacroName, ChordMacros,
-    ChordTaskAction, Key, KeyEvent, MetaChordCommand,
+    ChordEventTrigger, ChordInputEvent, ChordKeyboardEvent, ChordMacroName, ChordMacros, Key,
+    KeyEvent, MetaChordCommand, expand_typed_buffer, select_escape,
 };
 use crate::state::{
     ChordExecutionObservable, ChordInputObservable, ChordInputState, ChordMacrosObservable,
@@ -16,6 +16,8 @@ use keycode::KeyMappingCode;
 use nject::injectable;
 use parking_lot::Mutex;
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::AppHandle;
 use tauri_plugin_store::StoreExt;
 use tokio::sync::oneshot;
@@ -27,12 +29,18 @@ pub struct ChordInputManager {
     /// Repeated keydowns notify handlers without inserting duplicate buffer characters.
     #[inject(Mutex::new(HashSet::new()))]
     held_keys: Mutex<HashSet<Key>>,
+    /// Keys already held when insert mode began, such as Space; their repeats type nothing.
+    #[inject(Mutex::new(HashSet::new()))]
+    carried_keys: Mutex<HashSet<Key>>,
     #[inject(Mutex::new(ChordSequence::default()))]
     sequence: Mutex<ChordSequence>,
     #[inject(ChordTaskQueue::default())]
     task_queue: ChordTaskQueue,
     #[inject(ChordLoops::default())]
     loops: ChordLoops,
+    /// Counts executions, so a run that fails later only marks its own chord.
+    #[inject(Arc::new(AtomicU64::new(0)))]
+    executions: Arc<AtomicU64>,
     handle: AppHandle,
     observable: ChordInputObservable,
     execution_observable: ChordExecutionObservable,
@@ -119,13 +127,19 @@ impl ChordInputManager {
 
     /// Execute a complete chord sequence without synthesizing keyboard input.
     pub fn execute_sequence(&self, sequence: &str) -> Result<()> {
-        let input = Key::parse_sequence(sequence)?;
+        let resolved = self
+            .sequence
+            .lock()
+            .macros
+            .resolve_named(sequence)?
+            .with_context(|| format!("`{sequence}` references an undefined macro"))?;
+        let input = Key::parse_sequence(&resolved)?;
         if input.len() < 2 {
             bail!("a chord sequence must contain at least two keys");
         }
         self.end_active_task();
         self.reset_matching_chords()?;
-        let dispatch = self.resolve_dispatch(&input, &[ChordEventTrigger::Input], None)?;
+        let dispatch = self.resolve_dispatch(&input, &[], &[ChordEventTrigger::Input], None)?;
         let Some(event) = dispatch.input_event.clone() else {
             self.reset_matching_chords()?;
             bail!("no chord is configured for `{sequence}`");
@@ -212,19 +226,13 @@ impl ChordInputManager {
                 if *code == KeyMappingCode::Space
                     && Self::should_execute_key_buffer_on_release(&state)
                 {
-                    let dispatch = self.resolve_dispatch(
+                    self.execute_input(
                         &state.input,
+                        &state.quotes,
                         &[ChordEventTrigger::Input],
-                        Some(&event),
+                        &event,
+                        false,
                     )?;
-                    if let Some(input_event) = dispatch.input_event.clone() {
-                        self.set_executed_event(input_event)?;
-                        self.run_dispatch(dispatch, false)?;
-                        self.reset_matching_chords()?;
-                    } else {
-                        self.run_dispatch(dispatch, false)?;
-                        self.clear_key_buffer()?;
-                    }
                 }
             }
             KeyEvent::Press(Key(KeyMappingCode::CapsLock)) => {
@@ -232,24 +240,26 @@ impl ChordInputManager {
                 if state.input.is_empty() {
                     self.dispatch_current_buffer(&press_triggers, &event)?;
                     if let Some(selected) = state.selected_input_event {
-                        let dispatch = self.resolve_dispatch(
+                        self.execute_input(
                             &selected.input,
+                            &selected.quotes,
                             &[ChordEventTrigger::Input],
-                            Some(&event),
+                            &event,
+                            true,
                         )?;
-                        self.complete_dispatch(dispatch)?;
                     }
                 } else {
-                    let dispatch = self.resolve_dispatch(
+                    self.execute_input(
                         &state.input,
+                        &state.quotes,
                         &[
                             ChordEventTrigger::Keydown,
                             ChordEventTrigger::Keypress,
                             ChordEventTrigger::Input,
                         ],
-                        Some(&event),
+                        &event,
+                        true,
                     )?;
-                    self.complete_dispatch(dispatch)?;
                 }
             }
             KeyEvent::Press(Key(KeyMappingCode::Escape)) => {
@@ -258,6 +268,20 @@ impl ChordInputManager {
             }
             KeyEvent::Press(Key(KeyMappingCode::Space)) => {
                 self.dispatch_current_buffer(&press_triggers, &event)?;
+            }
+            KeyEvent::Press(Key(KeyMappingCode::Tab)) => {
+                // Typed escapes other than numbered buffers expand only on Tab.
+                let state = self.observable.get_state()?;
+                let selected = select_escape(&state.input, &self.sequence.lock().macros)?;
+                if let Some(input) = selected {
+                    self.edit_buffer(input, state.quotes, false)?;
+                }
+                self.dispatch_current_buffer(&press_triggers, &event)?;
+            }
+            // A quote always opens like an unshifted key, entering insert mode at the
+            // start of a step.
+            KeyEvent::Press(key @ Key(KeyMappingCode::Quote)) => {
+                self.handle_unshifted_key_press(key, &event)?;
             }
             KeyEvent::Press(key) => {
                 if is_shift_pressed && Self::should_clear_key_buffer_on_shifted_press(key) {
@@ -276,12 +300,14 @@ impl ChordInputManager {
     fn resolve_dispatch(
         &self,
         keys: &[Key],
+        quotes: &[String],
         triggers: &[ChordEventTrigger],
         keyboard_event: Option<&ChordKeyboardEvent>,
     ) -> Result<ChordSequenceDispatch> {
         let raw_event = ChordInputEvent {
             input: keys.to_vec(),
             application_id: self.handle.app_state().frontmost().frontmost()?,
+            quotes: quotes.to_vec(),
         };
         self.sequence
             .lock()
@@ -300,7 +326,7 @@ impl ChordInputManager {
     ) -> Result<()> {
         let state = self.observable.get_state()?;
         self.run_dispatch(
-            self.resolve_dispatch(&state.input, triggers, Some(event))?,
+            self.resolve_dispatch(&state.input, &state.quotes, triggers, Some(event))?,
             false,
         )
     }
@@ -352,12 +378,12 @@ impl ChordInputManager {
             }
         }
         let loop_run = dispatch
-            .loop_task
+            .plan
             .take()
-            .map(|task| {
+            .map(|plan| {
                 self.loops
-                    .reserve(&task, &self.execution_observable)
-                    .map(|(id, cancelled)| (id, task, cancelled))
+                    .reserve(plan.input.clone(), &self.execution_observable)
+                    .map(|(id, cancelled)| (id, plan, cancelled))
             })
             .transpose()?;
         if dispatch.tasks.is_empty() && dispatch.expired.is_empty() && loop_run.is_none() {
@@ -375,13 +401,56 @@ impl ChordInputManager {
         } else {
             None
         };
+        let report_failure = {
+            let observable = self.observable.provide();
+            let executions = self.executions.clone();
+            let execution = executions.load(Ordering::SeqCst);
+            let executed = dispatch.input_event.is_some();
+            move |error: &anyhow::Error| {
+                // Only the chord this run executed, and only while it is still shown.
+                if !executed || executions.load(Ordering::SeqCst) != execution {
+                    return;
+                }
+                let message = format!("{error:#}");
+                if let Err(error) = observable.set_state(|mut state| {
+                    if state.selected_input_event.is_some() {
+                        state.error = Some(message);
+                    }
+                    state
+                }) {
+                    log::error!("failed to show chord error: {error:#}");
+                }
+            }
+        };
         let handle = self.handle.clone();
         // Expired scopes have unique IDs. Releasing them can wait behind a busy
         // package loop, but must not stall commands in unrelated packages.
         let expired = std::mem::take(&mut dispatch.expired);
         let loops = self.loops.clone();
         let execution_observable = self.execution_observable.provide();
+        let window_app = dispatch
+            .input_event
+            .as_ref()
+            .map(|event| event.application_id.clone());
         self.task_queue.enqueue(async move {
+            let mut loop_run = loop_run;
+            // Select the target window outside the handlers, once per run, off the
+            // keyboard thread. Callbacks while typing have no completed input to target.
+            if let Some(app_id) = window_app {
+                select_run_window(
+                    &mut dispatch.tasks,
+                    loop_run.as_mut().map(|(_, plan, _)| plan),
+                    || async move {
+                        tauri::async_runtime::spawn_blocking(move || {
+                            crate::app::frontmost::focused_window_id(app_id.as_deref())
+                        })
+                        .await
+                        .ok()
+                        .flatten()
+                    },
+                )
+                .await;
+            }
             // Previous callbacks must finish creating their scopes before cleanup
             // is scheduled. The cleanup itself need not block new callbacks.
             if !expired.is_empty() {
@@ -416,22 +485,22 @@ impl ChordInputManager {
             .await;
             if let Err(error) = result {
                 log::error!("error running chord events: {error:#}");
-                if let Some((id, task, _)) = loop_run {
+                report_failure(&error);
+                if let Some((id, plan, _)) = loop_run {
                     loops.finish(id, &execution_observable);
-                    if let ChordTaskAction::Handler(action) = task.action {
-                        if let Some(id) = action.sequence_id {
-                            tauri::async_runtime::spawn(release_chord_sequences(handle, vec![id]));
-                        }
+                    if !plan.scopes.is_empty() {
+                        tauri::async_runtime::spawn(release_chord_sequences(handle, plan.scopes));
                     }
                 }
-            } else if let Some((id, task, cancelled)) = loop_run {
-                // Only the initializer stays in the ordered event queue. The loop must
+            } else if let Some((id, plan, cancelled)) = loop_run {
+                // Only the initializers stay in the ordered event queue. The plan must
                 // never keep a later chord or its halt command waiting on that queue.
                 tauri::async_runtime::spawn(async move {
-                    let result = run_loop(handle, task, cancelled).await;
+                    let result = run_plan(handle, plan, cancelled).await;
                     loops.finish(id, &execution_observable);
                     if let Err(error) = result {
                         log::error!("chord loop {id} stopped: {error:#}");
+                        report_failure(&error);
                     }
                 });
             }
@@ -451,22 +520,72 @@ impl ChordInputManager {
     }
 
     fn set_executed_event(&self, event: ChordInputEvent) -> Result<()> {
+        self.executions.fetch_add(1, Ordering::SeqCst);
         self.observable.set_state(move |state| ChordInputState {
             input: vec![],
+            quotes: vec![],
+            inserting: false,
             pressed_input_event: Some(event.clone()),
             selected_input_event: Some(event),
+            error: None,
             ..state
         })
     }
 
-    fn complete_dispatch(&self, dispatch: ChordSequenceDispatch) -> Result<()> {
+    /// Input that cannot run stays on screen like an executed chord, with the
+    /// reason in place of the chord's name.
+    fn fail_input(&self, input: &[Key], quotes: &[String], error: String) -> Result<()> {
+        self.end_active_task();
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        self.observable.set_state(|_| ChordInputState {
+            input: vec![],
+            quotes: vec![],
+            inserting: false,
+            pressed_input_event: None,
+            // Nothing ran, so no application received the chord.
+            selected_input_event: Some(ChordInputEvent {
+                input: input.to_vec(),
+                application_id: None,
+                quotes: quotes.to_vec(),
+            }),
+            description: None,
+            error: Some(error),
+        })?;
+        self.reset_matching_chords()
+    }
+
+    fn execute_input(
+        &self,
+        keys: &[Key],
+        quotes: &[String],
+        triggers: &[ChordEventTrigger],
+        event: &ChordKeyboardEvent,
+        hold_input: bool,
+    ) -> Result<()> {
+        match self.resolve_dispatch(keys, quotes, triggers, Some(event)) {
+            Ok(dispatch) => self.complete_dispatch(keys, quotes, dispatch, hold_input),
+            Err(error) => self.fail_input(keys, quotes, format!("{error:#}")),
+        }
+    }
+
+    fn complete_dispatch(
+        &self,
+        keys: &[Key],
+        quotes: &[String],
+        mut dispatch: ChordSequenceDispatch,
+        hold_input: bool,
+    ) -> Result<()> {
         if let Some(event) = dispatch.input_event.clone() {
             self.set_executed_event(event)?;
-            self.run_dispatch(dispatch, true)?;
-            self.reset_matching_chords()
-        } else {
-            self.run_dispatch(dispatch, false)?;
-            self.clear_key_buffer()
+            self.run_dispatch(dispatch, hold_input)?;
+            return self.reset_matching_chords();
+        }
+        let error = dispatch.error.take();
+        self.run_dispatch(dispatch, false)?;
+        match error {
+            Some(error) => self.fail_input(keys, quotes, error),
+            // Chords that only handle keyboard events have no input action to run.
+            None => self.clear_key_buffer(),
         }
     }
 
@@ -491,16 +610,25 @@ impl ChordInputManager {
         next_key_buffer
     }
 
+    /// A numbered buffer reference expands as soon as its digit is typed.
+    fn expand_typed_digit(&self, input: Vec<Key>, key: &Key) -> Vec<Key> {
+        if !key.is_digit() {
+            return input;
+        }
+        expand_typed_buffer(&input, &self.sequence.lock().macros).unwrap_or(input)
+    }
+
     fn handle_unshifted_key_press(&self, key: &Key, event: &ChordKeyboardEvent) -> Result<()> {
         let state = self.observable.get_state()?;
-        let next_key_buffer = Self::next_key_buffer_for_unshifted_press(&state.input, key);
-        self.observable.set_state(|state| ChordInputState {
-            input: next_key_buffer,
-            description: None,
-            selected_input_event: None,
-            pressed_input_event: None,
-            ..state
-        })?;
+        let next_key_buffer = self.expand_typed_digit(
+            Self::next_key_buffer_for_unshifted_press(&state.input, key),
+            key,
+        );
+        self.edit_buffer(
+            next_key_buffer,
+            state.quotes,
+            key.0 == KeyMappingCode::Quote,
+        )?;
         self.dispatch_current_buffer(
             &[ChordEventTrigger::Keydown, ChordEventTrigger::Keypress],
             event,
@@ -515,17 +643,91 @@ impl ChordInputManager {
         self.end_active_task();
         self.observable.set_state(|state| ChordInputState {
             input: vec![],
+            quotes: vec![],
+            inserting: false,
             selected_input_event: None,
             pressed_input_event: None,
             description: None,
+            error: None,
             ..state
         })?;
         self.reset_matching_chords()
     }
 
+    /// Replaces the buffer being typed; see `ChordSequence::edit_quotes`.
+    fn edit_buffer(&self, input: Vec<Key>, quotes: Vec<String>, opened: bool) -> Result<()> {
+        let (quotes, inserting) = self.sequence.lock().edit_quotes(&input, quotes, opened)?;
+        if inserting {
+            *self.carried_keys.lock() = self.held_keys.lock().clone();
+        }
+        self.observable.set_state(|state| ChordInputState {
+            input,
+            quotes,
+            inserting,
+            description: None,
+            selected_input_event: None,
+            pressed_input_event: None,
+            error: None,
+            ..state
+        })
+    }
+
+    pub fn is_inserting(&self) -> bool {
+        self.observable
+            .get_state()
+            .is_ok_and(|state| state.inserting)
+    }
+
+    /// In insert mode Chord stays active without Space and every key is typed into
+    /// the open quote. The controller handles Caps+Space and Esc before this.
+    pub fn handle_insert_key_event(&self, key_event: &KeyEvent) -> Result<()> {
+        let mut text = self
+            .observable
+            .get_state()?
+            .quotes
+            .pop()
+            .unwrap_or_default();
+        // The OS keeps toggling Caps Lock on a plain Caps press, so read it as typed.
+        let caps_lock = matches!(key_event, KeyEvent::Press(key) if key.is_letter())
+            && crate::app::keyboard::AppKeyboard::get_caps_lock().unwrap_or_else(|error| {
+                log::debug!("Failed to read the Caps Lock toggle: {error:#}");
+                false
+            });
+        let changed = type_into_quote(
+            &mut text,
+            &mut self.held_keys.lock(),
+            &mut self.carried_keys.lock(),
+            key_event,
+            caps_lock,
+        );
+        if !changed {
+            return Ok(());
+        }
+        self.observable.set_state(|mut state| {
+            if let Some(quote) = state.quotes.last_mut() {
+                *quote = text;
+            }
+            state
+        })
+    }
+
+    /// Caps+Space ends insert mode by closing the quote; Space is held again.
+    pub fn finish_insert(&self) -> Result<()> {
+        let state = self.observable.get_state()?;
+        let mut input = state.input;
+        input.push(Key(KeyMappingCode::Quote));
+        self.edit_buffer(input.clone(), state.quotes.clone(), false)?;
+        self.held_keys.lock().insert(Key(KeyMappingCode::Space));
+        self.run_dispatch(
+            self.resolve_dispatch(&input, &state.quotes, &[ChordEventTrigger::Keydown], None)?,
+            false,
+        )
+    }
+
     fn handle_shifted_key_press(&self, key: &Key, event: &ChordKeyboardEvent) -> Result<()> {
         let state = self.observable.get_state()?;
         let mut sequence = state.input;
+        let mut quotes = state.quotes;
         if sequence.is_empty() {
             let Some(selected) = state.selected_input_event else {
                 return self.dispatch_current_buffer(
@@ -534,30 +736,76 @@ impl ChordInputManager {
                 );
             };
             sequence = selected.input;
+            quotes = selected.quotes;
             sequence.pop();
         }
         sequence.push(*key);
-        let dispatch = self.resolve_dispatch(
+        let sequence = self.expand_typed_digit(sequence, key);
+        let dispatch = match self.resolve_dispatch(
             &sequence,
+            &quotes,
             &[
                 ChordEventTrigger::Keydown,
                 ChordEventTrigger::Keypress,
                 ChordEventTrigger::Input,
             ],
             Some(event),
-        )?;
+        ) {
+            Ok(dispatch) => dispatch,
+            Err(error) => return self.fail_input(&sequence, &quotes, format!("{error:#}")),
+        };
         if dispatch.input_event.is_some() {
-            self.complete_dispatch(dispatch)
+            self.complete_dispatch(&sequence, &quotes, dispatch, true)
         } else {
-            self.observable.set_state(|state| ChordInputState {
-                input: sequence,
-                description: None,
-                selected_input_event: None,
-                pressed_input_event: None,
-                ..state
-            })?;
+            self.edit_buffer(sequence, quotes, key.0 == KeyMappingCode::Quote)?;
             self.run_dispatch(dispatch, false)
         }
+    }
+}
+
+/// Applies one insert-mode key event to the open quote's `text`, returning whether
+/// it changed. Shift and other modifiers come from `held`, which follows the event
+/// order. As on macOS, Caps Lock capitalizes letters, with or without Shift. Key
+/// repeat types again, as in a text field, except for `carried` keys held since
+/// before insert mode began.
+fn type_into_quote(
+    text: &mut String,
+    held: &mut HashSet<Key>,
+    carried: &mut HashSet<Key>,
+    key_event: &KeyEvent,
+    caps_lock: bool,
+) -> bool {
+    should_handle_held_key_event(held, key_event);
+    let key = match key_event {
+        KeyEvent::Press(key) => key,
+        KeyEvent::Release(key) => {
+            carried.remove(key);
+            return false;
+        }
+    };
+    if carried.contains(key)
+        || Key::modifiers().contains(key)
+        || held
+            .iter()
+            .any(|key| Key::non_shift_modifiers().contains(key))
+    {
+        return false;
+    }
+    if key.0 == KeyMappingCode::Backspace {
+        return text.pop().is_some();
+    }
+    let shift = held.iter().any(|key| {
+        matches!(
+            key.0,
+            KeyMappingCode::ShiftLeft | KeyMappingCode::ShiftRight
+        )
+    });
+    match key.text_char(shift || (caps_lock && key.is_letter())) {
+        Some(character) => {
+            text.push(character);
+            true
+        }
+        None => false,
     }
 }
 
@@ -576,6 +824,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn insert_mode_types_text_in_event_order_and_ignores_keys_held_from_chord_mode() {
+        use KeyEvent::{Press, Release};
+        use KeyMappingCode::*;
+        let mut text = String::new();
+        let mut held = HashSet::from([Key(Space), Key(Quote)]);
+        let mut carried = held.clone();
+        let mut apply = |text: &mut String, events: &[KeyEvent], caps_lock: bool| {
+            for event in events {
+                type_into_quote(text, &mut held, &mut carried, event, caps_lock);
+            }
+        };
+        // Space and the quote were held to open insert mode: their repeats type nothing.
+        apply(
+            &mut text,
+            &[
+                Press(Key(Space)),
+                Press(Key(Quote)),
+                Release(Key(Quote)),
+                Release(Key(Space)),
+            ],
+            false,
+        );
+        assert_eq!(text, "");
+        // Shift follows the event order, so a fast release still types uppercase.
+        apply(
+            &mut text,
+            &[
+                Press(Key(ShiftLeft)),
+                Press(Key(KeyH)),
+                Release(Key(ShiftLeft)),
+                Release(Key(KeyH)),
+                Press(Key(KeyI)),
+                Press(Key(KeyI)),
+                Release(Key(KeyI)),
+                Press(Key(Space)),
+                Release(Key(Space)),
+                Press(Key(Quote)),
+                Release(Key(Quote)),
+                Press(Key(MetaLeft)),
+                Press(Key(KeyV)),
+                Release(Key(KeyV)),
+                Release(Key(MetaLeft)),
+                Press(Key(Enter)),
+                Press(Key(ArrowLeft)),
+            ],
+            false,
+        );
+        assert_eq!(text, "Hii '\n");
+        apply(
+            &mut text,
+            &[Press(Key(Backspace)), Press(Key(Backspace))],
+            false,
+        );
+        assert_eq!(text, "Hii ");
+        // Caps Lock capitalizes letters only, and Shift keeps them capitalized.
+        apply(
+            &mut text,
+            &[
+                Press(Key(KeyO)),
+                Press(Key(Digit1)),
+                Press(Key(ShiftLeft)),
+                Press(Key(KeyK)),
+                Press(Key(Digit1)),
+                Release(Key(ShiftLeft)),
+            ],
+            true,
+        );
+        assert_eq!(text, "Hii O1K!");
+    }
+
+    #[test]
     fn backspace_edits_the_buffer_and_non_text_keys_preserve_it() {
         let buffer = Key::parse_sequence("j,a").unwrap();
         assert_eq!(
@@ -585,21 +904,22 @@ mod tests {
             ),
             Key::parse_sequence("j,").unwrap()
         );
-        for key in [KeyMappingCode::Enter, KeyMappingCode::ShiftLeft] {
-            assert_eq!(
-                ChordInputManager::next_key_buffer_for_unshifted_press(&buffer, &Key(key)),
-                buffer
-            );
-        }
-        let mut with_arrow = buffer.clone();
-        with_arrow.push(Key(KeyMappingCode::ArrowLeft));
         assert_eq!(
             ChordInputManager::next_key_buffer_for_unshifted_press(
                 &buffer,
-                &Key(KeyMappingCode::ArrowLeft)
+                &Key(KeyMappingCode::ShiftLeft)
             ),
-            with_arrow
+            buffer
         );
+        // Enter is entered like arrows and every other key with sequence notation.
+        for key in [KeyMappingCode::ArrowLeft, KeyMappingCode::Enter] {
+            let mut expected = buffer.clone();
+            expected.push(Key(key));
+            assert_eq!(
+                ChordInputManager::next_key_buffer_for_unshifted_press(&buffer, &Key(key)),
+                expected
+            );
+        }
         assert!(
             ChordInputManager::next_key_buffer_for_unshifted_press(
                 &[],

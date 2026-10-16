@@ -13,8 +13,7 @@ fn required_permissions_granted_sync() -> bool {
             .build()
             .expect("build permission-check runtime");
         rt.block_on(async {
-            tauri_plugin_macos_permissions::check_input_monitoring_permission().await
-                && tauri_plugin_macos_permissions::check_accessibility_permission().await
+            tauri_plugin_macos_permissions::check_accessibility_permission().await
         })
     })
     .join()

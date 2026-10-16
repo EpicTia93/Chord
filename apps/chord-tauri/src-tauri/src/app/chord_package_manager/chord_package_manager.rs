@@ -858,6 +858,7 @@ mod file_picker_tests {
         ChordInputEvent {
             input: Key::parse_sequence(input).unwrap(),
             application_id: Some(app.into()),
+            ..Default::default()
         }
     }
 

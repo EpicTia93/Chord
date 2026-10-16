@@ -10,32 +10,8 @@ import {
 	DialogTitle,
 } from '@chord/dev.improve.chord.components.ui.dialog';
 import { StateQueries, usePermissionsState } from '@chord/dev.improve.chord.lib.state';
-import { Keyboard, MousePointer2 } from 'lucide-react';
+import { MousePointer2 } from 'lucide-react';
 import { useEffect } from 'react';
-
-type Permission = {
-	id: 'accessibility' | 'input-monitoring'
-	title: string
-	description: string
-	icon: typeof MousePointer2
-}
-
-const permissions: Permission[] = [
-	{
-		id: 'accessibility',
-		title: 'Chord needs Accessibility access',
-		description:
-			'Accessibility lets Chord click controls and run actions in other apps. macOS requires you to approve this in System Settings.',
-		icon: MousePointer2,
-	},
-	{
-		id: 'input-monitoring',
-		title: 'Chord needs Input Monitoring access',
-		description:
-			'Input Monitoring lets Chord detect your global trigger while you use other apps. macOS requires you to approve this in System Settings.',
-		icon: Keyboard,
-	},
-];
 
 export function PermissionsDialog({ onDismiss }: { onDismiss: () => void }) {
 	return (
@@ -54,19 +30,10 @@ function PermissionsDialogContent({
 	onDismiss: () => void
 	permissionsData: NonNullable<ReturnType<typeof usePermissionsState>['data']>
 }) {
-	const initialPermissions = permissionsData;
-	const { data: permissionState, refetch: refetchPermissions } = useQuery({
+	const { data: isAccessibilityEnabled, refetch: refetchPermissions } = useQuery({
 		queryKey: ['macos-permissions'],
-		queryFn: async () => {
-			const [isAccessibilityEnabled, isInputMonitoringEnabled]
-				= await taurpc.refreshPermissions();
-
-			return { isAccessibilityEnabled, isInputMonitoringEnabled };
-		},
-		initialData: {
-			isAccessibilityEnabled: initialPermissions.isAccessibilityEnabled ?? false,
-			isInputMonitoringEnabled: initialPermissions.isInputMonitoringEnabled ?? false,
-		},
+		queryFn: () => taurpc.refreshPermissions(),
+		initialData: permissionsData.isAccessibilityEnabled ?? false,
 		refetchOnWindowFocus: 'always',
 	});
 	useEffect(() => {
@@ -82,26 +49,12 @@ function PermissionsDialogContent({
 	const openAccessibilitySettingsMutation = useMutation({
 		mutationFn: taurpc.openAccessibilitySettings,
 	});
-	const openInputMonitoringSettingsMutation = useMutation({
-		mutationFn: taurpc.openInputMonitoringSettings,
-	});
-	const currentPermission = permissions.find((permission) => {
-		if (permission.id === 'accessibility') {
-			return !permissionState.isAccessibilityEnabled;
-		}
-
-		return !permissionState.isInputMonitoringEnabled;
-	});
-	const currentMutation = currentPermission?.id === 'accessibility'
-		? openAccessibilitySettingsMutation
-		: openInputMonitoringSettingsMutation;
-	const PermissionIcon = currentPermission?.icon ?? MousePointer2;
 
 	return (
 		<Dialog
-			open={currentPermission !== undefined}
+			open={!isAccessibilityEnabled}
 			onOpenChange={(open) => {
-				if (!open && currentPermission !== undefined) {
+				if (!open && !isAccessibilityEnabled) {
 					onDismiss();
 				}
 			}}
@@ -112,14 +65,15 @@ function PermissionsDialogContent({
 			>
 				<div className="flex gap-4 p-5">
 					<div className="flex size-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
-						<PermissionIcon className="size-6" strokeWidth={1.75} />
+						<MousePointer2 className="size-6" strokeWidth={1.75} />
 					</div>
 					<DialogHeader className="gap-2 pt-0.5">
 						<DialogTitle className="text-[17px] leading-5">
-							{currentPermission?.title}
+							Chord needs Accessibility access
 						</DialogTitle>
 						<DialogDescription className="leading-5">
-							{currentPermission?.description}
+							Accessibility lets Chord detect your global trigger and run actions in other apps.
+							macOS requires you to approve this in System Settings.
 						</DialogDescription>
 					</DialogHeader>
 				</div>
@@ -131,11 +85,11 @@ function PermissionsDialogContent({
 					<Button
 						type="button"
 						onClick={() => {
-							currentMutation.mutate();
+							openAccessibilitySettingsMutation.mutate();
 						}}
-						disabled={currentMutation.isPending}
+						disabled={openAccessibilitySettingsMutation.isPending}
 					>
-						{currentMutation.isPending ? 'Opening…' : 'Open System Settings'}
+						{openAccessibilitySettingsMutation.isPending ? 'Opening…' : 'Open System Settings'}
 					</Button>
 				</DialogFooter>
 			</DialogContent>

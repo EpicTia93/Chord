@@ -50,6 +50,19 @@ impl AppController {
         match app_mode {
             AppMode::Chord => {
                 let chord_mode_manager = self.handle.app_state().chord_mode_manager();
+                if chord_mode_manager.is_inserting() {
+                    // Insert mode keeps Chord active without Space, and no key reaches
+                    // other apps. Caps+Space closes the quote and Esc cancels Chord.
+                    if input.activates_chord_mode() {
+                        chord_mode_manager.finish_insert()?;
+                        self.handle.app_state().keyboard().on_normal_mode_started();
+                    } else if key_event == &KeyEvent::Press(Key(KeyMappingCode::Escape)) {
+                        self.set_idle_mode()?;
+                    } else {
+                        chord_mode_manager.handle_insert_key_event(key_event)?;
+                    }
+                    return Ok(());
+                }
                 chord_mode_manager.handle_key_event(&key_event);
 
                 if key_event == &KeyEvent::Release(Key(KeyMappingCode::Space)) {
@@ -59,7 +72,7 @@ impl AppController {
             AppMode::Idle => {
                 if input.activates_chord_mode() {
                     self.set_chord_mode()?;
-                    self.handle.app_state().keyboard().on_chord_mode_activated();
+                    self.handle.app_state().keyboard().on_normal_mode_started();
                 }
             }
         }
@@ -72,6 +85,7 @@ impl AppController {
         self.observable.set_state(|_| AppModeState::Idle)?;
         let chord_mode_manager = self.handle.app_state().chord_mode_manager();
         chord_mode_manager.ensure_inactive()?;
+        self.handle.app_state().keyboard().on_chord_mode_ended();
         Ok(())
     }
 

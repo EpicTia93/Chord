@@ -105,11 +105,15 @@ specific launched app after verifying its PID's executable path.
 The default signing identity comes from `bundle.macOS.signingIdentity`; override it
 with `CHORD_DEV_SIGNING_IDENTITY` or `APPLE_SIGNING_IDENTITY`. A certificate-backed
 identity is required; the launcher does not fall back to ad-hoc signing. Grant
-Accessibility and Input Monitoring to **Chord (Development)** once after switching
-to this launcher. Warp's grants no longer authorize the app. Chord continues to
-stop interception whenever access is unavailable and resumes after a grant.
-Permission logs retain denied/unknown/unexpected states and report executable
-replacement separately, rather than claiming every failed check was a revocation.
+Accessibility to **Chord (Development)** once after switching to this launcher.
+Warp's grants no longer authorize the app. Chord continues to stop interception
+whenever access is unavailable and resumes after a grant. Permission logs report
+executable replacement separately, rather than claiming every failed check was a
+revocation.
+
+Chord needs only Accessibility. Its event tap is an active filter, which macOS
+authorizes through Accessibility, and nothing reads raw HID input. macOS also
+reports Input Monitoring as granted to an app that only has Accessibility.
 
 Verify the snapshot launcher on a Mac with the configured signing certificate and
 an active desktop session using
@@ -133,15 +137,15 @@ production/beta launches retain the existing instance.
 
 ### Input ownership across app instances
 
-Each process registers at most one keyboard event tap and one Caps Lock HID listener.
+Each process registers at most one keyboard event tap.
 All app channels share an OS-held input lease. Development bundle identifiers
 (`com.leonsilicon.chord.development` and its dotted suffixes) take priority over
 production and other channels. Among instances of the same priority, the current
 owner stays active until it exits or becomes ineligible.
 
-An instance must have Accessibility and Input Monitoring enabled and its input
-handlers running before requesting ownership. Standby instances forward keyboard
-events untouched and ignore Caps Lock input. On handoff, Chord drains in-flight
+An instance must have Accessibility enabled and its event tap running before
+requesting ownership. Standby instances forward keyboard
+events untouched and leave the Caps key to macOS. On handoff, Chord drains in-flight
 input processing, exits chord mode, clears held-key state, and rejects queued
 input from the previous ownership generation. Ownership is checked every 25 ms;
 a handoff also waits for any current input handler to finish.
@@ -155,6 +159,57 @@ Ownership transitions appear in logs as `Input ownership: active` / `standby`.
 
 Both dev and production must run a build containing this protocol. Older installed
 builds do not participate and must be quit or updated before running alongside dev.
+
+### Caps key ownership
+
+macOS toggles Caps Lock in its HID filter, separately from the event stream that
+Chord's tap sees, so the two cannot be ordered. Instead, the input owner remaps
+the physical Caps key (usage `0x700000039`) to F20 (`0x70000006F`) in the
+system-wide `UserKeyMapping` (`app/keyboard/caps_remap.rs`). macOS then never
+toggles Caps Lock on its own. The key reaches the tap as F20, in order with Space,
+and the tap swallows it. Chord is the only writer of the toggle
+(`IOHIDSetModifierLockState`); `caps_lock_guard.rs` holds the rules. Chord edits
+only its own entry. Other Caps entries it displaces are restored when it lets go,
+unless the Caps key has been mapped again since.
+
+The mapping outlives the process that set it. Taking ownership records the holder
+(PID and start time) and the displaced entries in
+`com.leonsilicon.chord/caps-remap-v1/state.json` in the application-support
+directory, shared across channels and guarded by `state.lock`. Giving up ownership
+or quitting removes the entry and the file. For crashes, Chord registers a launchd
+agent (`~/Library/LaunchAgents/<identifier>.caps-guardian.plist`; development
+variants share `com.leonsilicon.chord.development.caps-guardian`). It runs
+`chord __caps-guardian --state <file>` and is kept alive exactly while the state
+file exists, including at the next login. The guardian waits on the holder's exit
+and on the state directory with kqueue, removes a dead holder's mapping, and exits
+when the file is gone. launchd throttles respawns to one every 10 seconds, so the
+guardian can start up to 10 seconds late after a quick relaunch. Its log is
+`<label>.log` next to the state file. A development launch re-registers the agent
+when the executable path changes.
+
+Secure Input hides keys from every event tap, so the owner also registers a Carbon
+hotkey for F20 (`caps_hotkey.rs`). It only fires while the tap cannot see the key;
+the tap swallows it otherwise. A Caps Lock toggle that macOS makes itself (keycode
+57 in the tap) means another app removed the mapping, and Chord installs it again.
+UTM's "Caps Lock as key" mode does this on launch.
+
+Apps learn about Caps Lock changes from `flagsChanged` events. A real toggle sends
+one with keycode 57. `IOHIDSetModifierLockState` instead sends one with keycode 255
+from every keyboard, then another with the next key's code just before that key.
+Chromium ignores these and Safari reports an "Unidentified" key. While Chord owns
+input, the tap rewrites the first report of each change (a `flagsChanged` event in
+which only the Caps Lock flag changed) to keycode 57, and swallows the repeats. Every
+app then sees what a real toggle would send, whichever app changed the state.
+
+VoiceOver only recognizes the physical Caps key as its modifier. Chord behaves the
+same for VoiceOver users. When VoiceOver has been set up with Caps Lock as a
+possible modifier (`SCRKeysToUseForVOModifier` in `com.apple.VoiceOver4/default` is
+not 0), the Activation Trigger settings card recommends Control-Option instead
+(`app/keyboard/voice_over.rs`).
+
+To check the mapping by hand, read `UserKeyMapping` from an
+`IOHIDEventSystemClient` with no service. `hidutil property --get UserKeyMapping`
+lists each keyboard's copy instead.
 
 ### Runtime log levels
 
@@ -193,8 +248,8 @@ Revoking Accessibility access releases the observers and clears the context;
 granting it attaches them again.
 
 The listener lives in `app/frontmost/file_picker/native.rs`, using `objc2`
-framework bindings. Raw Caps Lock input and toggle state live in
-`app/keyboard/caps_listener.rs` and `caps_lock.rs`. These components and their
+framework bindings. The Caps key mapping and toggle state live in
+`app/keyboard/caps_remap.rs` and `caps_lock.rs`. These components and their
 fixtures are Rust; Chord no longer compiles handwritten C or Objective-C sources.
 
 Detection uses AppKit's nonlocalized `open-panel` / `save-panel` identifiers on

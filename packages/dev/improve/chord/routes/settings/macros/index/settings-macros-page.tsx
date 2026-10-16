@@ -11,9 +11,11 @@ import {
   CardTitle,
 } from "@chord/dev.improve.chord.components.ui.card";
 import { Input } from "@chord/dev.improve.chord.components.ui.input";
+import { Textarea } from "@chord/dev.improve.chord.components.ui.textarea";
 import { StateQueries, useChordMacrosState } from "@chord/dev.improve.chord.lib.state";
 import { Pencil, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { Fragment, useState, type ComponentProps } from "react";
+import { sequenceLines, sequenceToText, textToSequence } from "#macro-sequence-text";
 
 export function SettingsMacrosPage() {
   return (
@@ -23,7 +25,7 @@ export function SettingsMacrosPage() {
   );
 }
 
-function MacrosContent({ entries }: { entries: ChordMacroEntry[] }) {
+export function MacrosContent({ entries }: { entries: ChordMacroEntry[] }) {
   const named = entries.filter((entry) => entry.target.type === "named");
   return (
     <div className="space-y-4">
@@ -32,7 +34,7 @@ function MacrosContent({ entries }: { entries: ChordMacroEntry[] }) {
           <CardTitle>Named Macros</CardTitle>
           <CardDescription>
             Expand a macro with <code>{"\\=name="}</code>. Names starting with a digit clear when
-            Chord restarts; other names are saved.
+            Chord restarts; other names are saved. <EnterHint />
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -51,7 +53,7 @@ function MacrosContent({ entries }: { entries: ChordMacroEntry[] }) {
           <CardTitle>Temporary Buffers</CardTitle>
           <CardDescription>
             Use <code>{"\\1"}</code> through <code>{"\\9"}</code> to expand these buffers. They
-            clear when Chord restarts.
+            clear when Chord restarts. <EnterHint />
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">
@@ -72,15 +74,19 @@ function MacrosContent({ entries }: { entries: ChordMacroEntry[] }) {
 
 function NamedMacroEditor({ entry, onDone }: { entry?: ChordMacroEntry; onDone?: () => void }) {
   const [name, setName] = useState(entry?.target.type === "named" ? entry.target.value : "");
-  const [sequence, setSequence] = useState(entry?.sequence ?? "");
+  const [text, setText] = useState(sequenceToText(entry?.sequence ?? ""));
   const save = useMutation({
     mutationFn: () =>
-      taurpc.setChordMacro({ type: "named", value: name }, sequence, entry?.target ?? null),
+      taurpc.setChordMacro(
+        { type: "named", value: name },
+        textToSequence(text),
+        entry?.target ?? null,
+      ),
     onSuccess: () => {
       if (onDone) onDone();
       else {
         setName("");
-        setSequence("");
+        setText("");
       }
     },
   });
@@ -92,7 +98,7 @@ function NamedMacroEditor({ entry, onDone }: { entry?: ChordMacroEntry; onDone?:
         save.mutate();
       }}
     >
-      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_auto] sm:items-end">
+      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_auto] sm:items-start">
         <label className="min-w-0 space-y-1 text-xs text-muted-foreground">
           <span>Name</span>
           <Input
@@ -109,19 +115,16 @@ function NamedMacroEditor({ entry, onDone }: { entry?: ChordMacroEntry; onDone?:
         </label>
         <label className="min-w-0 space-y-1 text-xs text-muted-foreground">
           <span>Sequence</span>
-          <Input
-            value={sequence}
-            onChange={(event) => setSequence(event.target.value)}
+          <SequenceTextarea
+            value={text}
+            onValueChange={setText}
             placeholder="1720x864"
-            spellCheck={false}
-            autoCapitalize="none"
-            autoCorrect="off"
             aria-label={entry ? `Sequence for ${reference(entry.target)}` : "New macro sequence"}
-            className="font-mono"
             disabled={save.isPending}
           />
         </label>
-        <div className="flex items-center gap-2">
+        {/* Line up with the inputs below their labels while the sequence grows. */}
+        <div className="flex items-center gap-2 sm:pt-5">
           {onDone && (
             <Button type="button" variant="outline" onClick={onDone} disabled={save.isPending}>
               Cancel
@@ -159,9 +162,7 @@ function NamedMacroRow({ entry }: { entry: ChordMacroEntry }) {
               <code className="break-all text-sm font-medium">{reference(entry.target)}</code>
               <Badge variant="outline">{entry.persistent ? "Persistent" : "Temporary"}</Badge>
             </div>
-            <p className="break-all font-mono text-xs text-muted-foreground">
-              {entry.sequence || "(empty sequence)"}
-            </p>
+            <SequencePreview sequence={entry.sequence} />
           </div>
           <Button
             type="button"
@@ -192,7 +193,8 @@ function NamedMacroRow({ entry }: { entry: ChordMacroEntry }) {
 }
 
 function BufferRow({ digit, entry }: { digit: number; entry?: ChordMacroEntry }) {
-  const [sequence, setSequence] = useState(entry?.sequence ?? "");
+  const [text, setText] = useState(sequenceToText(entry?.sequence ?? ""));
+  const sequence = textToSequence(text);
   const target: ChordMacroName = { type: "buffer", value: digit };
   const save = useMutation({ mutationFn: () => taurpc.setChordMacro(target, sequence, null) });
   const clear = useMutation({ mutationFn: () => taurpc.removeChordMacro(target) });
@@ -206,41 +208,107 @@ function BufferRow({ digit, entry }: { digit: number; entry?: ChordMacroEntry })
       }}
       className="space-y-1"
     >
-      <div className="flex items-center gap-2">
+      {/* Multiline buffers grow downward; the label and buttons stay on the first line. */}
+      <div className="flex items-start gap-2">
         <label
           htmlFor={`macro-buffer-${digit}`}
-          className="w-7 shrink-0 font-mono text-sm"
+          className="w-7 shrink-0 font-mono text-sm leading-8"
         >{`\\${digit}`}</label>
-        <Input
+        <SequenceTextarea
           id={`macro-buffer-${digit}`}
           aria-label={`Buffer ${digit} sequence`}
-          value={sequence}
-          onChange={(event) => setSequence(event.target.value)}
+          value={text}
+          onValueChange={setText}
           placeholder="Empty"
-          className="min-w-0 flex-1 font-mono"
-          spellCheck={false}
-          autoCapitalize="none"
-          autoCorrect="off"
+          className="min-w-0 flex-1"
           disabled={pending}
         />
-        {dirty && (
-          <Button type="submit" size="sm" disabled={pending}>
-            {save.isPending ? "Saving…" : "Save"}
+        <div className="flex h-8 shrink-0 items-center gap-2">
+          {dirty && (
+            <Button type="submit" size="sm" disabled={pending}>
+              {save.isPending ? "Saving…" : "Save"}
+            </Button>
+          )}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-label={`Clear buffer ${digit}`}
+            disabled={pending || !entry}
+            onClick={() => clear.mutate()}
+          >
+            Clear
           </Button>
-        )}
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          aria-label={`Clear buffer ${digit}`}
-          disabled={pending || !entry}
-          onClick={() => clear.mutate()}
-        >
-          Clear
-        </Button>
+        </div>
       </div>
       {(save.isError || clear.isError) && <MacroError error={save.error ?? clear.error} />}
     </form>
+  );
+}
+
+function EnterHint() {
+  return (
+    <>
+      Each new line is an Enter key press; <kbd>⌘↩</kbd> saves.
+    </>
+  );
+}
+
+/**
+ * Enter inserts a line break, which is saved as an Enter key press; ⌘Enter
+ * submits the form, since Enter no longer does.
+ */
+function SequenceTextarea({
+  value,
+  onValueChange,
+  className,
+  ...props
+}: Omit<ComponentProps<typeof Textarea>, "value" | "onChange" | "rows"> & {
+  value: string;
+  onValueChange: (value: string) => void;
+}) {
+  return (
+    <Textarea
+      {...props}
+      value={value}
+      onChange={(event) => onValueChange(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" && event.metaKey) {
+          event.preventDefault();
+          event.currentTarget.form?.requestSubmit();
+        }
+      }}
+      // Sizes to the content where `field-sizing` is unsupported.
+      rows={value.split("\n").length}
+      spellCheck={false}
+      autoCapitalize="none"
+      autoCorrect="off"
+      className={`min-h-8 resize-none py-1.25 font-mono ${className ?? ""}`}
+    />
+  );
+}
+
+/** Shows each Enter key press as ↩ at the end of its line, including a trailing one. */
+function SequencePreview({ sequence }: { sequence: string }) {
+  const lines = sequenceLines(sequence);
+  return (
+    <p className="whitespace-pre-wrap break-all font-mono text-xs text-muted-foreground">
+      {sequence === ""
+        ? "(empty sequence)"
+        : lines.map((line, index) => (
+            <Fragment key={index}>
+              {line}
+              {index < lines.length - 1 && (
+                <>
+                  <span title="Enter" className="text-muted-foreground/60">
+                    ↩
+                  </span>
+                  {"\n"}
+                </>
+              )}
+            </Fragment>
+          ))}
+    </p>
   );
 }
 

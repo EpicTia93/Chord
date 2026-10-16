@@ -6,6 +6,7 @@
 //! from sleep) is otherwise silently dead: events keep flowing to other apps
 //! and nothing tells the process.
 
+use super::caps_remap::REMAPPED_KEYCODE;
 use super::health::InputHealth;
 use crate::models::{Key, KeyEvent, KeyEventAction};
 use anyhow::{Context, Result, anyhow};
@@ -26,6 +27,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+/// macOS virtual keycode of Caps Lock. A native toggle produces it; changes made
+/// through `IOHIDSetModifierLockState` arrive with keycode 255 or the code of the next
+/// key, and Chord rewrites them to it (see `TapEvent::CapsLockChanged`).
+const CAPS_LOCK_KEYCODE: i64 = 0x39;
 
 /// Marker rdev puts on the events Chord itself posts; those must pass through untouched.
 const SYNTHETIC_EVENT_USER_DATA: [i64; 2] = [0xDEAD_BEEF, 0xDEAD_DEAD];
@@ -49,17 +55,66 @@ const NX_CONTROLMASK: u64 = 0x0004_0000;
 const NX_ALTERNATEMASK: u64 = 0x0008_0000;
 const NX_COMMANDMASK: u64 = 0x0010_0000;
 const NX_SECONDARYFNMASK: u64 = 0x0080_0000;
+const NX_ALPHASHIFTMASK: u64 = 0x0001_0000;
+
+/// Flags that change only when a modifier goes down or up, or Caps Lock toggles.
+/// Other bits ride along on ordinary keys: arrow keys carry the numeric-pad and Fn
+/// bits, for example.
+const HELD_STATE_MASK: u64 = NX_DEVICELCTLKEYMASK
+    | NX_DEVICELSHIFTKEYMASK
+    | NX_DEVICERSHIFTKEYMASK
+    | NX_DEVICELCMDKEYMASK
+    | NX_DEVICERCMDKEYMASK
+    | NX_DEVICELALTKEYMASK
+    | NX_DEVICERALTKEYMASK
+    | NX_DEVICERCTLKEYMASK
+    | NX_ALPHASHIFTMASK
+    | NX_SHIFTMASK
+    | NX_CONTROLMASK
+    | NX_ALTERNATEMASK
+    | NX_COMMANDMASK;
 
 #[derive(Debug, PartialEq)]
 pub enum TapEvent {
     Key(KeyEvent),
-    /// Restoring Caps Lock can emit flagsChanged with the last ordinary
-    /// key's code. Chromium interprets it as a keydown with an Unidentified
-    /// key, even when Chord swallowed that key's actual press and release.
-    NonModifierFlagsChanged(Key),
+    /// An auto-repeat of the remapped Caps key (F20). Swallowed without reaching the
+    /// controller: Caps never repeats.
+    RemappedCapsRepeat,
+    /// macOS toggled Caps Lock itself, so Chord's key mapping is gone (another tool
+    /// rewrote `UserKeyMapping`). The toggle already happened and reaches apps.
+    NativeCapsToggle,
+    /// Caps Lock changed through `IOHIDSetModifierLockState`, by Chord or another
+    /// app: a flagsChanged event in which nothing but the Caps Lock flag changed.
+    /// macOS reports it with keycode 255, or with the code of whichever key comes
+    /// next, while apps expect the keycode 57 of a real Caps Lock toggle. Chromium
+    /// drops it, and Safari reports an "Unidentified" key.
+    CapsLockChanged,
+    /// A flagsChanged event that reports no key and no change: macOS repeats a Caps
+    /// Lock change for every keyboard, and again before the next key. Browsers turn
+    /// these into stray key events.
+    CapsLockRepeated,
 }
 
-pub type TapSink = Box<dyn FnMut(TapEvent) -> KeyEventAction + Send>;
+/// What the tap does with an event.
+#[derive(Debug, PartialEq)]
+pub enum TapAction {
+    Forward,
+    Consume,
+    /// Forward a `TapEvent::CapsLockChanged` as the event a real Caps Lock toggle
+    /// produces, so every app sees exactly what it would without Chord.
+    ForwardAsCapsLockKey,
+}
+
+impl From<KeyEventAction> for TapAction {
+    fn from(action: KeyEventAction) -> Self {
+        match action {
+            KeyEventAction::Forward => Self::Forward,
+            KeyEventAction::Consume => Self::Consume,
+        }
+    }
+}
+
+pub type TapSink = Box<dyn FnMut(TapEvent) -> TapAction + Send>;
 
 /// State handed to the C callback. Lives on the tap thread for as long as the
 /// tap exists; the callback only runs on that thread.
@@ -68,6 +123,9 @@ struct TapContext {
     sink: TapSink,
     health: Arc<InputHealth>,
     disabled_notifications: u32,
+    /// Flags of the last keyboard event from a device, to tell what a flagsChanged
+    /// event changed.
+    previous_flags: Option<u64>,
 }
 
 impl TapContext {
@@ -93,15 +151,33 @@ impl TapContext {
 
         // SAFETY: Core Graphics hands the callback a live event for the duration of the call.
         let event = unsafe { event.as_ref() };
-        let user_data = CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUserData);
+        let user_data =
+            CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUserData);
         if SYNTHETIC_EVENT_USER_DATA.contains(&user_data) {
             return KeyEventAction::Forward;
         }
 
         let keycode = CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
-        match decode_tap_event(kind, keycode, CGEvent::flags(Some(event)).bits()) {
-            Some(event) => (self.sink)(event),
-            None => KeyEventAction::Forward,
+        let autorepeat =
+            CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventAutorepeat) != 0;
+        let flags = CGEvent::flags(Some(event)).bits();
+        let decoded = decode_tap_event(kind, keycode, flags, autorepeat, self.previous_flags);
+        self.previous_flags = Some(flags);
+        let Some(decoded) = decoded else {
+            return KeyEventAction::Forward;
+        };
+        match (self.sink)(decoded) {
+            TapAction::Forward => KeyEventAction::Forward,
+            TapAction::Consume => KeyEventAction::Consume,
+            TapAction::ForwardAsCapsLockKey => {
+                // Rewritten in place, so it keeps its position, time and flags.
+                CGEvent::set_integer_value_field(
+                    Some(event),
+                    CGEventField::KeyboardEventKeycode,
+                    CAPS_LOCK_KEYCODE,
+                );
+                KeyEventAction::Forward
+            }
         }
     }
 }
@@ -133,30 +209,53 @@ fn key_from_keycode(keycode: i64) -> Option<Key> {
     Key::try_from(mac_keycode::Key::from_keycode(keycode)?).ok()
 }
 
-fn decode_tap_event(kind: CGEventType, keycode: i64, flags: u64) -> Option<TapEvent> {
+fn decode_tap_event(
+    kind: CGEventType,
+    keycode: i64,
+    flags: u64,
+    autorepeat: bool,
+    previous_flags: Option<u64>,
+) -> Option<TapEvent> {
+    // The physical Caps key, remapped so macOS never toggles Caps Lock itself. It
+    // arrives here in order with every other key; see `caps_remap`.
+    let caps = Key(KeyMappingCode::CapsLock);
     match kind {
+        CGEventType::KeyDown | CGEventType::KeyUp if keycode == REMAPPED_KEYCODE => {
+            Some(match (kind == CGEventType::KeyDown, autorepeat) {
+                (true, true) => TapEvent::RemappedCapsRepeat,
+                (true, false) => TapEvent::Key(KeyEvent::Press(caps)),
+                (false, _) => TapEvent::Key(KeyEvent::Release(caps)),
+            })
+        }
         CGEventType::KeyDown => key_from_keycode(keycode)
             .map(KeyEvent::Press)
             .map(TapEvent::Key),
         CGEventType::KeyUp => key_from_keycode(keycode)
             .map(KeyEvent::Release)
             .map(TapEvent::Key),
-        CGEventType::FlagsChanged => decode_flags_changed(keycode, flags)
-            .map(TapEvent::Key)
-            .or_else(|| {
-                key_from_keycode(keycode)
-                    // Real Caps Lock toggle notifications must still reach apps.
-                    .filter(|key| key.0 != KeyMappingCode::CapsLock)
-                    .map(TapEvent::NonModifierFlagsChanged)
-            }),
+        CGEventType::FlagsChanged if keycode == CAPS_LOCK_KEYCODE => {
+            Some(TapEvent::NativeCapsToggle)
+        }
+        // A real modifier always changes its own bits, so an event that changes only
+        // Caps Lock is a lock-state report, whatever keycode it carries.
+        CGEventType::FlagsChanged
+            if previous_flags.is_some_and(|previous| {
+                (previous ^ flags) & HELD_STATE_MASK == NX_ALPHASHIFTMASK
+            }) =>
+        {
+            Some(TapEvent::CapsLockChanged)
+        }
+        CGEventType::FlagsChanged => Some(
+            decode_flags_changed(keycode, flags).map_or(TapEvent::CapsLockRepeated, TapEvent::Key),
+        ),
         _ => None,
     }
 }
 
 /// Turns a modifier `flagsChanged` event into a press or release.
 ///
-/// Caps Lock (keycode 57) is deliberately not decoded here: macOS reports only
-/// its toggle, after a hold delay, so it comes from the HID listener instead.
+/// Caps Lock (keycode 57) is not a held modifier: the physical key arrives
+/// remapped as F20, and keycode 57 only reports a toggle macOS made itself.
 pub(super) fn decode_flags_changed(keycode: i64, flags: u64) -> Option<KeyEvent> {
     use mac_keycode::Key as K;
     let key = K::from_keycode(u16::try_from(keycode).ok()?)?;
@@ -241,6 +340,7 @@ fn run_tap(
         sink,
         health: health.clone(),
         disabled_notifications: 0,
+        previous_flags: None,
     });
     let events_of_interest = (1u64 << CGEventType::KeyDown.0)
         | (1u64 << CGEventType::KeyUp.0)
@@ -259,7 +359,7 @@ fn run_tap(
     };
     let Some(tap) = tap else {
         let _ = ready_tx.send(Err(anyhow!(
-            "CGEventTapCreate failed: Accessibility (or Input Monitoring) is not granted to this executable"
+            "CGEventTapCreate failed: Accessibility is not granted to this executable"
         )));
         return;
     };
@@ -385,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn caps_lock_and_unknown_keycodes_are_left_to_other_sources() {
+    fn caps_lock_and_unknown_keycodes_are_not_modifier_presses() {
         assert_eq!(decode_flags_changed(CAPS_LOCK, 0x1_0000), None);
         assert_eq!(decode_flags_changed(0x7FFF, NX_SHIFTMASK), None);
         assert_eq!(decode_flags_changed(-1, NX_SHIFTMASK), None);
@@ -399,41 +499,153 @@ mod tests {
         assert_eq!(key_from_keycode(0x7FFF), None);
     }
 
+    const OFF: u64 = 0x100;
+    const ON: u64 = 0x100 | NX_ALPHASHIFTMASK;
+
     #[test]
-    fn caps_restoration_does_not_become_another_space_press() {
-        let space = key(KeyMappingCode::Space);
+    fn a_lock_change_is_reported_once_as_the_caps_lock_key() {
+        // What one IOHIDSetModifierLockState call produced on a Mac with two
+        // keyboards: keycode 255 from each, then the next key's code before that key.
+        let reports = [(0xFF, ON), (0xFF, ON), (0x31, ON)];
+        let mut previous = OFF;
+        let decoded: Vec<_> = reports
+            .into_iter()
+            .map(|(keycode, flags)| {
+                let event = decode_tap_event(
+                    CGEventType::FlagsChanged,
+                    keycode,
+                    flags,
+                    false,
+                    Some(previous),
+                );
+                previous = flags;
+                event
+            })
+            .collect();
         assert_eq!(
-            decode_tap_event(CGEventType::KeyDown, 0x31, 0x100),
-            Some(TapEvent::Key(KeyEvent::Press(space)))
+            decoded,
+            [
+                Some(TapEvent::CapsLockChanged),
+                Some(TapEvent::CapsLockRepeated),
+                Some(TapEvent::CapsLockRepeated),
+            ]
+        );
+        // The key itself follows as usual, and turning Caps Lock off works the same.
+        assert_eq!(
+            decode_tap_event(CGEventType::KeyUp, 0x31, ON, false, Some(ON)),
+            Some(TapEvent::Key(KeyEvent::Release(key(KeyMappingCode::Space))))
         );
         assert_eq!(
-            decode_tap_event(CGEventType::FlagsChanged, 0x31, 0x100),
-            Some(TapEvent::NonModifierFlagsChanged(space))
+            decode_tap_event(CGEventType::FlagsChanged, 0x31, OFF, false, Some(ON)),
+            Some(TapEvent::CapsLockChanged)
         );
+    }
+
+    #[test]
+    fn a_lock_report_is_recognized_by_its_flags_not_its_keycode() {
+        // An idle keyboard whose last key was Shift reports with Shift's code.
         assert_eq!(
-            decode_tap_event(CGEventType::KeyUp, 0x31, 0x100),
-            Some(TapEvent::Key(KeyEvent::Release(space)))
+            decode_tap_event(CGEventType::FlagsChanged, SHIFT, ON, false, Some(OFF)),
+            Some(TapEvent::CapsLockChanged)
         );
-        // Restoration can carry other ordinary keycodes too.
+        // Bits that ride along on ordinary keys, like an arrow key's, don't count.
+        let arrow = OFF | 0x0020_0000 | NX_SECONDARYFNMASK;
         assert_eq!(
-            decode_tap_event(CGEventType::FlagsChanged, 0, 0),
-            Some(TapEvent::NonModifierFlagsChanged(key(KeyMappingCode::KeyA)))
+            decode_tap_event(CGEventType::FlagsChanged, 0xFF, ON, false, Some(arrow)),
+            Some(TapEvent::CapsLockChanged)
+        );
+        // Without a previous event there is nothing to compare: no report.
+        assert_eq!(
+            decode_tap_event(CGEventType::FlagsChanged, 0xFF, ON, false, None),
+            Some(TapEvent::CapsLockRepeated)
         );
     }
 
     #[test]
     fn real_modifier_changes_keep_their_existing_behavior() {
+        let shift = NX_SHIFTMASK | NX_DEVICELSHIFTKEYMASK;
+        for caps_lock in [OFF, ON] {
+            assert_eq!(
+                decode_tap_event(
+                    CGEventType::FlagsChanged,
+                    SHIFT,
+                    caps_lock | shift,
+                    false,
+                    Some(caps_lock)
+                ),
+                Some(TapEvent::Key(KeyEvent::Press(key(
+                    KeyMappingCode::ShiftLeft
+                ))))
+            );
+            assert_eq!(
+                decode_tap_event(
+                    CGEventType::FlagsChanged,
+                    SHIFT,
+                    caps_lock,
+                    false,
+                    Some(caps_lock | shift)
+                ),
+                Some(TapEvent::Key(KeyEvent::Release(key(
+                    KeyMappingCode::ShiftLeft
+                ))))
+            );
+        }
+        // A modifier that changes together with Caps Lock is still the modifier.
         assert_eq!(
-            decode_tap_event(CGEventType::FlagsChanged, CAPS_LOCK, 0x10100),
-            None
+            decode_tap_event(
+                CGEventType::FlagsChanged,
+                SHIFT,
+                ON | shift,
+                false,
+                Some(OFF)
+            ),
+            Some(TapEvent::Key(KeyEvent::Press(key(
+                KeyMappingCode::ShiftLeft
+            ))))
+        );
+    }
+
+    #[test]
+    fn the_remapped_caps_key_is_caps_and_never_repeats() {
+        let caps = key(KeyMappingCode::CapsLock);
+        assert_eq!(
+            decode_tap_event(
+                CGEventType::KeyDown,
+                REMAPPED_KEYCODE,
+                OFF,
+                false,
+                Some(OFF)
+            ),
+            Some(TapEvent::Key(KeyEvent::Press(caps)))
         );
         assert_eq!(
-            decode_tap_event(CGEventType::FlagsChanged, 0xFF, 0x100),
-            None
+            decode_tap_event(CGEventType::KeyDown, REMAPPED_KEYCODE, OFF, true, Some(OFF)),
+            Some(TapEvent::RemappedCapsRepeat)
         );
         assert_eq!(
-            decode_tap_event(CGEventType::FlagsChanged, SHIFT, NX_SHIFTMASK),
-            Some(TapEvent::Key(KeyEvent::Press(key(KeyMappingCode::ShiftLeft))))
+            decode_tap_event(CGEventType::KeyUp, REMAPPED_KEYCODE, OFF, false, Some(OFF)),
+            Some(TapEvent::Key(KeyEvent::Release(caps)))
         );
+        // Other keys still repeat as before.
+        assert_eq!(
+            decode_tap_event(CGEventType::KeyDown, 0x00, OFF, true, Some(OFF)),
+            Some(TapEvent::Key(KeyEvent::Press(key(KeyMappingCode::KeyA))))
+        );
+    }
+
+    #[test]
+    fn a_native_caps_toggle_means_the_mapping_is_gone() {
+        for (flags, previous) in [(ON, OFF), (OFF, ON)] {
+            assert_eq!(
+                decode_tap_event(
+                    CGEventType::FlagsChanged,
+                    CAPS_LOCK,
+                    flags,
+                    false,
+                    Some(previous)
+                ),
+                Some(TapEvent::NativeCapsToggle)
+            );
+        }
     }
 }

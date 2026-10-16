@@ -47,6 +47,9 @@ impl AppSingleton for DevLockfileDetector {
                             );
                         }
                     });
+                    // Before the lease is released, so the next owner takes the Caps
+                    // key only after this one gave it back.
+                    handle.app_state().keyboard().set_input_owner(active);
                     log::info!(
                         "Input ownership: {} ({})",
                         if active { "active" } else { "standby" },

@@ -258,6 +258,7 @@ fn run_app_with_cli_command(startup_command: Option<tauri_app::scripting::CliApp
             if let Err(error) = handle.app_state().chord_mode_manager().stop_loops() {
                 log::error!("Failed to stop chord loops on exit: {error:#}");
             }
+            handle.app_state().keyboard().release_input();
             bun_js::package_worker::shutdown_all();
             #[cfg(target_os = "macos")]
             if let Err(error) = dev_runtime::publish_exit(exit_code) {
@@ -295,6 +296,12 @@ pub async fn run_script_export(
     args: Vec<String>,
 ) -> anyhow::Result<()> {
     bun_js::run_standalone_export(path.as_ref(), export_name.into(), args).await
+}
+
+/// Internal launchd agent that removes Chord's Caps key mapping if Chord dies holding it.
+#[cfg(target_os = "macos")]
+pub fn run_caps_guardian(state: &std::path::Path) -> anyhow::Result<()> {
+    app::keyboard::caps_guardian::run(state)
 }
 
 /// Internal package subprocess entry; callers must provide the parent's private IPC endpoint.

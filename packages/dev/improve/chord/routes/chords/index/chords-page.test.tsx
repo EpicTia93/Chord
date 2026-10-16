@@ -14,7 +14,7 @@ afterAll(() => {
 for (const layout of [ChordLayout.SidebarLeft, ChordLayout.FloatingBottom]) {
   test(`${layout} displays macros before arrow escapes when backslash is typed`, () => {
     const props: Parameters<typeof ChordsPageContent>[0] = {
-      chordInputData: { input: ["Backslash"] },
+      chordInputData: { input: ["Backslash"], quotes: [], inserting: false },
       chordPanelData: { isVisible: true, layout },
       keyboardData: { isCapsPressed: false, isShiftPressed: false },
       frontmostData: { filePickerActive: false },
@@ -39,6 +39,34 @@ for (const layout of [ChordLayout.SidebarLeft, ChordLayout.FloatingBottom]) {
     expect(html.indexOf("\\=window-size=")).toBeLessThan(html.indexOf("\\up"));
   });
 
+  test(`${layout} keeps failed input on screen in red with its error`, () => {
+    const props: Parameters<typeof ChordsPageContent>[0] = {
+      chordInputData: {
+        input: [],
+        quotes: [],
+        inserting: false,
+        selectedInputEvent: { input: ["KeyX", "KeyQ"], quotes: [] },
+        error: "repeat count must fit in an unsigned 32-bit integer",
+      },
+      chordPanelData: { isVisible: true, layout },
+      keyboardData: { isCapsPressed: false, isShiftPressed: false },
+      frontmostData: { filePickerActive: false },
+      chordPackageManagerData: { packages: [] },
+      chordExecutionData: { loops: [], metaCommands: [], haltLoopTemplate: "0h{id}" },
+      chordMacrosData: { entries: [] },
+    };
+    const failed = renderToString(<ChordsPageContent {...props} />);
+    expect(failed).toContain('role="alert"');
+    expect(failed).toContain("Repeat count must fit in an unsigned 32-bit integer");
+    expect(failed).toContain("border-red-400/90");
+    expect(failed).not.toContain("border-emerald-400/90");
+    for (const token of ["X", "Q"]) expect(failed).toContain(`>${token}</kbd>`);
+
+    const executed = renderToString(<ChordsPageContent {...props} chordInputData={{ input: [], quotes: [], inserting: false, selectedInputEvent: { input: ["KeyX", "KeyQ"], quotes: [] } }} />);
+    expect(executed).not.toContain('role="alert"');
+    expect(executed).not.toContain("border-red-400/90");
+  });
+
   for (const filePickerActive of [false, true]) {
     test(`${layout} follows native file-picker priority when active=${filePickerActive}`, () => {
       function packageFor(app: string, name: string): ChordPackage {
@@ -57,7 +85,7 @@ for (const layout of [ChordLayout.SidebarLeft, ChordLayout.FloatingBottom]) {
         };
       }
       const html = renderToString(<ChordsPageContent
-        chordInputData={{ input: ["KeyG", "KeyH"] }}
+        chordInputData={{ input: ["KeyG", "KeyH"], quotes: [], inserting: false }}
         chordPanelData={{ isVisible: true, layout }}
         keyboardData={{ isCapsPressed: false, isShiftPressed: false }}
         frontmostData={{ frontmostAppBundleId: "dev.fixture", filePickerActive }}
@@ -69,4 +97,48 @@ for (const layout of [ChordLayout.SidebarLeft, ChordLayout.FloatingBottom]) {
       expect(html).not.toContain(filePickerActive ? "Host navigation" : "Finder navigation");
     });
   }
+  test(`${layout} completes the chord after Enter in a configured sequence`, () => {
+    const path = "chords/dev/fixture/macos.toml";
+    const html = renderToString(<ChordsPageContent
+      // 3`d2,i13`/w]⏎/w
+      chordInputData={{ input: ["Digit3", "Backquote", "KeyD", "Digit2", "Comma", "KeyI", "Digit1", "Digit3", "Backquote", "Slash", "KeyW", "BracketRight", "Enter", "Slash", "KeyW"], quotes: [], inserting: false }}
+      chordPanelData={{ isVisible: true, layout }}
+      keyboardData={{ isCapsPressed: false, isShiftPressed: false }}
+      frontmostData={{ frontmostAppBundleId: "dev.fixture", filePickerActive: false }}
+      chordPackageManagerData={{ packages: [{
+        name: "@fixture/test",
+        rawChordsFiles: {},
+        globalChords: [],
+        compiledChordsFiles: {
+          [path]: {
+            name: "fixture", pathslug: path, meta: {}, handlers: [],
+            chords: [{ rawTrigger: "/w]", trigger: { keys: ["Slash", "KeyW", "BracketRight"] }, name: "Close tab", index: 0, actions: [] }],
+            chordHints: [],
+          },
+        },
+      }] }}
+      chordExecutionData={{ loops: [], metaCommands: [], haltLoopTemplate: "0h{id}" }}
+      chordMacrosData={{ entries: [] }}
+    />);
+    expect(html).toContain("↩");
+    if (layout === ChordLayout.SidebarLeft) {
+      expect(html).toContain("Repeat 3 times · `d2,i13` · Step 2");
+      // The next column offers the rest of the chord being typed.
+      expect(html).toContain("Close tab");
+    }
+  });
+
+  test(`${layout} shows insert-mode text in place of the open quote`, () => {
+    const html = renderToString(<ChordsPageContent
+      chordInputData={{ input: ["Digit3", "Quote"], quotes: ["Hello, World"], inserting: true, description: "Insert mode · Caps+Space closes the quote · Esc cancels" }}
+      chordPanelData={{ isVisible: true, layout }}
+      keyboardData={{ isCapsPressed: false, isShiftPressed: false }}
+      frontmostData={{ filePickerActive: false }}
+      chordPackageManagerData={{ packages: [] }}
+      chordExecutionData={{ loops: [], metaCommands: [], haltLoopTemplate: "0h{id}" }}
+      chordMacrosData={{ entries: [] }}
+    />);
+    expect(html).toContain("Hello, World");
+    expect(html).toContain("Caps+Space closes the quote");
+  });
 }

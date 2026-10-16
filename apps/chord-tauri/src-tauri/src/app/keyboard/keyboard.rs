@@ -1,32 +1,26 @@
-use super::caps_listener::CapsHandle;
-use super::caps_lock_restore::CapsLockRestore;
+use super::caps_lock_guard::CapsLockGuard;
+use super::caps_remap::{ProcessIdentity, RemapStore, SystemMappingTable};
 use super::health::{Backoff, InputHealth};
 use super::secure_input::SecureInputState;
-use super::tap::{TapEvent, TapHandle};
+use super::tap::{TapAction, TapEvent, TapHandle};
+use super::{caps_guardian, caps_hotkey};
 use crate::app::AppHandleExt;
-use crate::app::permissions::{InputMonitoringAccess, InputPermissions};
+use crate::app::permissions::InputPermissions;
 use crate::models::{AppKeyboardState, CapturedKeyEvent, Key, KeyEvent, KeyEventAction};
 use anyhow::Result;
 use bitflags::bitflags;
 use keycode::KeyMappingCode;
 use nject::injectable;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::mpsc::{TrySendError, sync_channel};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
 use std::time::{Duration, Instant};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
-const CAPS_LOCK_QUEUE_CAPACITY: usize = 16;
 const KEY_EVENT_QUEUE_CAPACITY: usize = 1_024;
 
 /// How often the supervisor re-checks permissions and listener health.
 pub const SUPERVISOR_INTERVAL: Duration = Duration::from_millis(250);
-/// With no readable keyboard for this long, the HID manager is recreated:
-/// device enumeration can go stale after Karabiner or sleep churn.
-pub const CAPS_RESCAN_AFTER: Duration = Duration::from_secs(10);
-/// How often the OS Caps Lock toggle is sampled while the key is up, so a
-/// toggle made elsewhere (another app, Karabiner) becomes the new baseline.
-const CAPS_LOCK_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 bitflags! {
   pub struct Modifiers: u16 {
@@ -47,8 +41,6 @@ bitflags! {
 pub(super) struct Listeners {
     tap: Option<TapHandle>,
     tap_backoff: Backoff,
-    caps: Option<CapsHandle>,
-    caps_backoff: Backoff,
     secure_input: SecureInputState,
 }
 
@@ -65,8 +57,12 @@ pub struct AppKeyboard {
     #[inject(Mutex::new(Listeners::default()))]
     listeners: Mutex<Listeners>,
 
-    #[inject(CapsLockRestore::default())]
-    caps_lock_restore: CapsLockRestore,
+    #[inject(CapsLockGuard::default())]
+    caps_lock_guard: CapsLockGuard,
+
+    /// Whether this instance holds the Caps key mapping (see `caps_remap`).
+    #[inject(AtomicBool::new(false))]
+    holds_caps_remap: AtomicBool,
 
     handle: AppHandle,
 }
@@ -80,41 +76,138 @@ impl AppKeyboard {
         &self.health
     }
 
-    /// Both listeners are up and Caps Lock can be observed. Input ownership
-    /// (see `DevLockfileDetector`) is only claimed while this holds.
+    /// The event tap is up. Input ownership (see `DevLockfileDetector`) is only
+    /// claimed while this holds; the Caps key reaches Chord through the tap.
     pub fn input_handlers_running(&self) -> bool {
-        self.health.tap_running() && self.health.caps_ready(Instant::now())
+        self.health.tap_running()
     }
 
+    /// Input ownership changed hands: put back the Caps Lock state from before
+    /// Chord started, and forget every held key.
     pub fn reset_input_state(&self) {
+        self.on_chord_mode_ended();
         self.keyboard_state.reset();
         self.modifier_flags.store(0, Ordering::Relaxed);
-        self.caps_lock_restore.reset();
     }
 
-    /// Chord mode was entered with Caps+Space: put the OS Caps Lock toggle
-    /// back to what it was before the Caps press. Called by the controller.
-    pub fn on_chord_mode_activated(&self) {
-        let before = self.caps_lock_restore.chord_activated();
-        self.restore_caps_lock(before);
-    }
-
-    fn restore_caps_lock(&self, enabled: bool) {
-        log::debug!("Restoring Caps Lock toggle to {enabled} after Chord activation");
-        if let Err(error) = Self::set_caps_lock(enabled) {
-            log::warn!("Failed to restore the Caps Lock toggle: {error:#}");
+    /// Takes or gives up the Caps key: its mapping, and the hotkey that covers for
+    /// the tap under Secure Input. Only the input owner holds them, so a standby
+    /// instance leaves Caps Lock alone. Called by `DevLockfileDetector`.
+    pub fn set_input_owner(&self, active: bool) {
+        if active {
+            if let Err(error) = self.install_caps_remap() {
+                log::error!(
+                    "Failed to take over the Caps key; Caps+Space cannot start Chord: {error:#}"
+                );
+            }
+        } else {
+            self.release_caps_remap();
+        }
+        let handle = self.handle.clone();
+        let registered = self.handle.run_on_main_thread(move || {
+            if let Err(error) = caps_hotkey::set_registered(&handle, active) {
+                log::warn!("Failed to update the Caps hotkey fallback: {error:#}");
+            }
+        });
+        if let Err(error) = registered {
+            log::warn!("Failed to schedule the Caps hotkey fallback update: {error:#}");
         }
     }
 
-    /// Reads the OS toggle while Caps is up. Skipped during a hold, when the
-    /// OS may be mid-toggle.
-    fn sample_os_caps_lock(&self) {
-        if self.keyboard_state.is_caps_pressed() {
+    /// Chord is exiting: restore Caps Lock and give the key back to macOS.
+    pub fn release_input(&self) {
+        self.on_chord_mode_ended();
+        self.release_caps_remap();
+    }
+
+    fn caps_remap_store(&self) -> Result<RemapStore> {
+        // Shared by every channel, like the input lease, so one guardian sees any holder.
+        let directory = self
+            .handle
+            .path()
+            .local_data_dir()?
+            .join("com.leonsilicon.chord/caps-remap-v1");
+        Ok(RemapStore::new(directory.join("state.json")))
+    }
+
+    fn install_caps_remap(&self) -> Result<()> {
+        let store = self.caps_remap_store()?;
+        static GUARDIAN: Once = Once::new();
+        GUARDIAN.call_once(|| {
+            let identifier = &self.handle.config().identifier;
+            if let Err(error) = caps_guardian::ensure_registered(identifier, store.path()) {
+                log::error!(
+                    "Failed to register the Caps guardian; a crash would leave Caps Lock remapped: {error:#}"
+                );
+            }
+        });
+        store.install(&SystemMappingTable, ProcessIdentity::current()?)?;
+        if !self.holds_caps_remap.swap(true, Ordering::SeqCst) {
+            log::info!("Took over the Caps key (mapped to F20 while Chord owns input)");
+        }
+        Ok(())
+    }
+
+    fn release_caps_remap(&self) {
+        if !self.holds_caps_remap.swap(false, Ordering::SeqCst) {
             return;
         }
-        match Self::get_caps_lock() {
-            Ok(enabled) => self.caps_lock_restore.observe(enabled),
-            Err(error) => log::debug!("Failed to read the Caps Lock toggle: {error:#}"),
+        let released = self.caps_remap_store().and_then(|store| {
+            store.uninstall(&SystemMappingTable, Some(ProcessIdentity::current()?))
+        });
+        match released {
+            Ok(_) => log::info!("Gave the Caps key back to macOS"),
+            Err(error) => log::error!("Failed to remove the Caps key mapping: {error:#}"),
+        }
+    }
+
+    /// macOS toggled Caps Lock itself, so something removed Chord's mapping (UTM's
+    /// "Caps Lock as key" cleanup does). Put it back; the toggle stands, like any tap.
+    fn on_native_caps_toggle(&self) {
+        if !self.holds_caps_remap.load(Ordering::SeqCst) {
+            return;
+        }
+        log::warn!(
+            "macOS toggled Caps Lock itself; the Caps key mapping was removed by another app. Restoring it"
+        );
+        let handle = self.handle.clone();
+        let spawned = std::thread::Builder::new()
+            .name("chord-caps-remap".into())
+            .spawn(move || {
+                let keyboard = handle.app_state().keyboard();
+                if keyboard.holds_caps_remap.load(Ordering::SeqCst)
+                    && let Err(error) = keyboard.install_caps_remap()
+                {
+                    log::error!("Failed to restore the Caps key mapping: {error:#}");
+                }
+            });
+        if let Err(error) = spawned {
+            log::error!("Failed to restore the Caps key mapping: {error:#}");
+        }
+    }
+
+    /// Caps+Space started Chord's normal mode, from idle or from insert mode.
+    /// Caps Lock stays off while normal mode is active. Called by the controller.
+    pub fn on_normal_mode_started(&self) {
+        let current = Self::get_caps_lock()
+            .inspect_err(|error| log::warn!("Failed to read the Caps Lock toggle: {error:#}"))
+            .unwrap_or(false);
+        let enabled = self.caps_lock_guard.normal_mode_started(current);
+        Self::apply_caps_lock(enabled);
+    }
+
+    /// Chord ended: put back the Caps Lock toggle from before it started.
+    /// Called by the controller.
+    pub fn on_chord_mode_ended(&self) {
+        if let Some(enabled) = self.caps_lock_guard.chord_ended() {
+            Self::apply_caps_lock(enabled);
+        }
+    }
+
+    fn apply_caps_lock(enabled: bool) {
+        log::debug!("Setting Caps Lock to {enabled}");
+        if let Err(error) = Self::set_caps_lock(enabled) {
+            log::warn!("Failed to set the Caps Lock toggle: {error:#}");
         }
     }
 
@@ -127,15 +220,8 @@ impl AppKeyboard {
             .name("chord-input-supervisor".into())
             .spawn(move || {
                 let mut permissions_error_reported = false;
-                let mut last_caps_lock_sample: Option<Instant> = None;
                 loop {
                     let state = handle.app_state();
-                    if last_caps_lock_sample
-                        .is_none_or(|last| last.elapsed() >= CAPS_LOCK_SAMPLE_INTERVAL)
-                    {
-                        last_caps_lock_sample = Some(Instant::now());
-                        state.keyboard().sample_os_caps_lock();
-                    }
                     let permissions = match state.permissions().refresh_if_changed() {
                         Ok(permissions) => {
                             permissions_error_reported = false;
@@ -170,7 +256,6 @@ impl AppKeyboard {
     pub(super) fn reconcile_listeners(&self, permissions: InputPermissions, now: Instant) {
         let mut listeners = self.listeners();
         self.reconcile_tap(&mut listeners, permissions.accessibility, now);
-        self.reconcile_caps(&mut listeners, permissions.input_monitoring, now);
     }
 
     fn reconcile_tap(&self, listeners: &mut Listeners, accessibility: bool, now: Instant) {
@@ -213,67 +298,6 @@ impl AppKeyboard {
         }
     }
 
-    fn reconcile_caps(
-        &self,
-        listeners: &mut Listeners,
-        input_monitoring: InputMonitoringAccess,
-        now: Instant,
-    ) {
-        if listeners.caps.as_ref().is_some_and(CapsHandle::is_finished) {
-            log::error!("Caps Lock listener thread exited unexpectedly; scheduling a restart");
-            if let Some(caps) = listeners.caps.take() {
-                caps.stop();
-            }
-            listeners.caps_backoff.failed(now);
-        }
-        if !input_monitoring.is_granted() {
-            if let Some(caps) = listeners.caps.take() {
-                log::warn!(
-                    "Input Monitoring check reports {input_monitoring:?}; stopping the Caps Lock listener"
-                );
-                caps.stop();
-            }
-            return;
-        }
-        if listeners.caps.is_some() && self.caps_needs_rescan(now) {
-            log::warn!(
-                "No readable keyboard for {CAPS_RESCAN_AFTER:?}; recreating the Caps Lock HID manager"
-            );
-            if let Some(caps) = listeners.caps.take() {
-                caps.stop();
-            }
-        }
-        if listeners.caps.is_some() || !listeners.caps_backoff.ready(now) {
-            return;
-        }
-        match self.spawn_caps_listener() {
-            Ok(caps) => {
-                if listeners.caps_backoff.failures() > 0 {
-                    log::info!(
-                        "Caps Lock listener recovered after {} failed attempt(s)",
-                        listeners.caps_backoff.failures()
-                    );
-                }
-                listeners.caps_backoff.succeeded();
-                listeners.caps = Some(caps);
-            }
-            Err(error) => {
-                let delay = listeners.caps_backoff.failed(now);
-                log::error!(
-                    "Failed to start the Caps Lock listener (retrying in {delay:?}): {error:#}"
-                );
-            }
-        }
-    }
-
-    fn caps_needs_rescan(&self, now: Instant) -> bool {
-        self.health.caps_open_devices() == 0
-            && self
-                .health
-                .caps_devices_lost_at()
-                .is_some_and(|lost_at| now.duration_since(lost_at) >= CAPS_RESCAN_AFTER)
-    }
-
     fn check_secure_input(&self) {
         let current = SecureInputState::current();
         let mut listeners = self.listeners();
@@ -305,6 +329,11 @@ impl AppKeyboard {
                         .app_state()
                         .dev_lockfile_detector()
                         .with_input_generation(generation, || {
+                            // In order with the controller, which decides the mode.
+                            handle
+                                .app_state()
+                                .keyboard()
+                                .handle_caps_event(&event.event);
                             if let Err(error) =
                                 handle.app_state().app_controller().handle_key_event(&event)
                             {
@@ -317,7 +346,7 @@ impl AppKeyboard {
         let handle = self.handle.clone();
         let mut queue_full_reported = false;
         let mut disconnected_reported = false;
-        let sink = move |event: TapEvent| -> KeyEventAction {
+        let sink = move |event: TapEvent| -> TapAction {
             let keyboard = handle.app_state().keyboard();
             handle
                 .app_state()
@@ -325,10 +354,14 @@ impl AppKeyboard {
                 .with_input_owner(|generation| {
                     let event = match event {
                         TapEvent::Key(event) => event,
-                        TapEvent::NonModifierFlagsChanged(key) => {
-                            log::debug!("Suppressing non-modifier flagsChanged for {key:?}");
-                            return KeyEventAction::Consume;
+                        TapEvent::RemappedCapsRepeat => return TapAction::Consume,
+                        TapEvent::NativeCapsToggle => {
+                            keyboard.on_native_caps_toggle();
+                            return TapAction::Forward;
                         }
+                        // Only the input owner rewrites, so two instances never both do.
+                        TapEvent::CapsLockChanged => return TapAction::ForwardAsCapsLockKey,
+                        TapEvent::CapsLockRepeated => return TapAction::Consume,
                     };
                     let input = CapturedKeyEvent {
                         event,
@@ -352,79 +385,11 @@ impl AppKeyboard {
                             }
                         }
                     }
-                    action
+                    action.into()
                 })
-                .unwrap_or(KeyEventAction::Forward)
+                .unwrap_or(TapAction::Forward)
         };
         TapHandle::spawn(self.health.clone(), Box::new(sink))
-    }
-
-    /// Creates the Caps Lock listener and the thread that applies its events.
-    fn spawn_caps_listener(&self) -> Result<CapsHandle> {
-        let (tx, rx) = sync_channel::<bool>(CAPS_LOCK_QUEUE_CAPACITY);
-        let handle = self.handle.clone();
-        std::thread::Builder::new()
-            .name("chord-caps-events".into())
-            .spawn(move || {
-                while let Ok(pressed) = rx.recv() {
-                    let key = Key(KeyMappingCode::CapsLock);
-                    let event = if pressed {
-                        KeyEvent::Press(key)
-                    } else {
-                        KeyEvent::Release(key)
-                    };
-                    // Waits out an ownership handoff instead of dropping the event.
-                    handle
-                        .app_state()
-                        .dev_lockfile_detector()
-                        .with_current_input_owner(|_generation| {
-                            // HID already mirrors the latest physical state. Do not
-                            // overwrite it by replaying an older queued Caps event.
-                            handle.app_state().keyboard().handle_caps_event(&event);
-                            if let Err(error) = handle
-                                .app_state()
-                                .app_controller()
-                                .handle_key_event(&CapturedKeyEvent {
-                                    event,
-                                    caps_pressed: pressed,
-                                })
-                            {
-                                log::error!("Failed to handle Caps Lock event: {error:#}");
-                            }
-                        });
-                }
-            })?;
-
-        let handle = self.handle.clone();
-        let mut queue_full_reported = false;
-        let mut disconnected_reported = false;
-        let sink = move |pressed: bool| {
-            // Mirror the physical key immediately so a Space arriving on the
-            // event tap moments later sees the right state.
-            handle
-                .app_state()
-                .keyboard()
-                .state()
-                .set_caps_pressed(pressed);
-            match tx.try_send(pressed) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    if !queue_full_reported {
-                        queue_full_reported = true;
-                        log::warn!(
-                            "Dropping Caps Lock events because the bounded input queue is saturated"
-                        );
-                    }
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    if !disconnected_reported {
-                        disconnected_reported = true;
-                        log::error!("Caps Lock event handler thread is gone");
-                    }
-                }
-            }
-        };
-        CapsHandle::spawn(self.health.clone(), Box::new(sink))
     }
 
     pub fn emit_caps_lock() -> Result<()> {
@@ -454,8 +419,15 @@ impl AppKeyboard {
 
         let app_mode = self.handle.app_state().app_controller().app_mode();
 
-        // Space while Caps is held enters Chord mode and is never typed.
-        if input.activates_chord_mode() {
+        // Space while Caps is held enters Chord mode and is never typed. The Caps
+        // key itself is Chord's alone: it arrives remapped and never reaches apps.
+        if input.activates_chord_mode()
+            || matches!(
+                event,
+                KeyEvent::Press(Key(KeyMappingCode::CapsLock))
+                    | KeyEvent::Release(Key(KeyMappingCode::CapsLock))
+            )
+        {
             return KeyEventAction::Consume;
         }
 
@@ -466,22 +438,42 @@ impl AppKeyboard {
         KeyEventAction::Forward
     }
 
+    /// Applies Caps Lock for a Caps press or release, in order with the controller.
+    /// See `CapsLockGuard` for the rules.
     fn handle_caps_event(&self, event: &KeyEvent) {
-        // A plain Caps press toggles Caps Lock as usual. Only a press that
-        // activates Chord mode (see `on_chord_mode_activated`) restores the
-        // toggle; the release restores it once more because the OS toggle
-        // may land after the activation on keyboards with a Caps Lock delay.
         match event {
-            KeyEvent::Press(Key(KeyMappingCode::CapsLock)) => self.caps_lock_restore.pressed(),
-            KeyEvent::Release(Key(KeyMappingCode::CapsLock)) => {
-                if let Some(before) = self.caps_lock_restore.released() {
-                    self.restore_caps_lock(before);
+            KeyEvent::Press(Key(KeyMappingCode::CapsLock)) => {
+                let state = self.handle.app_state();
+                let in_normal_mode = state.app_controller().app_mode().is_chord()
+                    && !state.chord_mode_manager().is_inserting();
+                let current = match Self::get_caps_lock() {
+                    Ok(current) => current,
+                    Err(error) => {
+                        log::warn!("Failed to read the Caps Lock toggle: {error:#}");
+                        return;
+                    }
+                };
+                if let Some(enabled) = self.caps_lock_guard.pressed(current, in_normal_mode) {
+                    Self::apply_caps_lock(enabled);
                 }
-                // Re-sample the OS toggle now that the key is up; a plain press just toggled it.
-                self.sample_os_caps_lock();
+            }
+            KeyEvent::Release(Key(KeyMappingCode::CapsLock)) => {
+                if let Some(enabled) = self.caps_lock_guard.released() {
+                    Self::apply_caps_lock(enabled);
+                }
             }
             _ => {}
         }
+    }
+
+    /// A Caps press or release the tap could not see (Secure Input), delivered by
+    /// the hotkey fallback instead.
+    pub(super) fn handle_unseen_caps_event(&self, event: &KeyEvent) {
+        let detector = self.handle.app_state().dev_lockfile_detector();
+        detector.with_input_owner(|_generation| {
+            self.keyboard_state.handle_key_event(event);
+            self.handle_caps_event(event);
+        });
     }
 
     #[allow(dead_code)]

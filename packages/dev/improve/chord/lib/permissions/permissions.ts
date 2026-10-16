@@ -5,7 +5,6 @@ import { useEffect, useState } from 'react';
 export function useAppPermissionsState() {
 	const [state, setState] = useState<AppPermissionsState>({
 		isAccessibilityEnabled: false,
-		isInputMonitoringEnabled: false,
 		isAutostartEnabled: false,
 	});
 

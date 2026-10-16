@@ -310,6 +310,7 @@ mod tests {
                 &[Key(KeyMappingCode::ShiftLeft)],
                 false,
             )),
+            focused_window_id: Some(u32::MAX),
         };
         let request = Request::Invoke {
             action,
@@ -334,6 +335,7 @@ mod tests {
         assert_eq!(action.sequence_id.as_deref(), Some("interval"));
         assert_eq!(action.assign_to.as_deref(), Some("state"));
         assert!(action.keyboard_event.unwrap().shift_key);
+        assert_eq!(action.focused_window_id, Some(u32::MAX));
         assert_eq!(app_id.as_deref(), Some("dev.fixture"));
         assert_eq!(count, 32);
     }
@@ -358,6 +360,7 @@ mod tests {
             sequence_id: None,
             assign_to: None,
             keyboard_event: None,
+            focused_window_id: Some(u32::MAX),
         };
         let bytes = encode(&Request::Invoke {
             action,
@@ -371,6 +374,7 @@ mod tests {
             panic!()
         };
         assert_eq!(action.event_args[0], date);
+        assert_eq!(action.focused_window_id, Some(u32::MAX));
         let nested = action.event_args[1]["nested"].as_array().unwrap();
         assert_eq!(nested[0].as_float(), Some(f64::NEG_INFINITY));
         assert!(nested[1].as_float().unwrap().is_nan());

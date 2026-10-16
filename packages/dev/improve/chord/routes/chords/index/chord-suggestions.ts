@@ -5,6 +5,7 @@ const SPECIAL_KEY_SUGGESTIONS = [
   { reference: "\\left", description: "Left arrow", kind: "key" },
   { reference: "\\down", description: "Down arrow", kind: "key" },
   { reference: "\\right", description: "Right arrow", kind: "key" },
+  { reference: "\\n", description: "Enter", kind: "key" },
 ] as const;
 
 export interface EscapeSuggestion {
@@ -13,21 +14,26 @@ export interface EscapeSuggestion {
   kind: "macro" | "key";
 }
 
-/** Tokens have already collapsed complete arrow escapes into physical-key glyphs. */
+const BUFFER_REFERENCE = /^\\[1-9]$/;
+
+/**
+ * Typed escapes never expand on their own: Tab replaces the escape with the
+ * `active` suggestion. Numbered buffers expand as soon as their digit is typed,
+ * so Tab skips them.
+ */
 export function getEscapeSuggestions(tokens: string[], macros: ChordMacroEntry[]) {
   const start = tokens.lastIndexOf("\\");
   if (start === -1) return null;
   const suffix = tokens.slice(start);
-  // Completed references no longer need suggestions, even when more keys follow.
+  // A numbered buffer reference is complete, even when more keys follow.
   if (/^[1-9]$/.test(suffix[1] ?? "")) return null;
-  if (suffix[1] === "=" && suffix.slice(2).includes("=")) return null;
   const prefix = suffix.join("").toLowerCase();
   const macroSuggestions = [...macros]
     .sort((left, right) => {
       if (left.target.type !== right.target.type) return left.target.type === "buffer" ? -1 : 1;
-      return String(left.target.value).localeCompare(String(right.target.value), undefined, {
-        numeric: true,
-      });
+      // Code-unit order, as natively, so the active suggestion matches Tab.
+      const [a, b] = [String(left.target.value), String(right.target.value)];
+      return a < b ? -1 : a > b ? 1 : 0;
     })
     .map((macro): EscapeSuggestion => ({
       reference:
@@ -36,11 +42,14 @@ export function getEscapeSuggestions(tokens: string[], macros: ChordMacroEntry[]
       kind: "macro",
     }))
     .filter((suggestion) => suggestion.reference.startsWith(prefix));
+  const suggestions = [
+    ...macroSuggestions,
+    ...SPECIAL_KEY_SUGGESTIONS.filter((suggestion) => suggestion.reference.startsWith(prefix)),
+  ];
   return {
     prefix,
-    suggestions: [
-      ...macroSuggestions,
-      ...SPECIAL_KEY_SUGGESTIONS.filter((suggestion) => suggestion.reference.startsWith(prefix)),
-    ],
+    suggestions,
+    active: suggestions.find((suggestion) => !BUFFER_REFERENCE.test(suggestion.reference))
+      ?.reference,
   };
 }

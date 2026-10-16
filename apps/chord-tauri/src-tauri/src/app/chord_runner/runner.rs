@@ -1,6 +1,7 @@
 use super::{
     HandlerChordActionTaskRun, HandlerChordActionTaskRunner, ShellChordActionTaskRun,
     ShellChordActionTaskRunner, ShortcutChordActionTaskRun, ShortcutChordActionTaskRunner,
+    TypeChordActionTaskRun, TypeChordActionTaskRunner,
 };
 use crate::models::{ChordInputEvent, ChordTaskAction, FilePathslug};
 use crate::tauri_app::play_failure_sound;
@@ -29,6 +30,7 @@ pub enum ChordActionTaskRun {
     Shell(ShellChordActionTaskRun),
     Shortcut(ShortcutChordActionTaskRun),
     Handler(HandlerChordActionTaskRun),
+    Type(TypeChordActionTaskRun),
 }
 
 #[injectable]
@@ -37,6 +39,7 @@ pub struct ChordActionTaskRunner {
     handle: AppHandle,
     shell: ShellChordActionTaskRunner,
     pub shortcut: ShortcutChordActionTaskRunner,
+    typing: TypeChordActionTaskRunner,
 }
 
 impl ChordActionTaskRunner {
@@ -56,6 +59,10 @@ impl ChordActionTaskRunner {
                 .shortcut
                 .start(task, action)
                 .map(ChordActionTaskRun::Shortcut),
+            ChordTaskAction::Type(action) => self
+                .typing
+                .start(task, action)
+                .map(ChordActionTaskRun::Type),
         };
         if result.is_err() {
             play_failure_sound(&self.handle);
@@ -69,6 +76,7 @@ impl ChordActionTaskRunner {
             ChordActionTaskRun::Handler(task_run) => self.handler.end(task_run).await,
             ChordActionTaskRun::Shell(task_run) => self.shell.end(task_run).await,
             ChordActionTaskRun::Shortcut(task_run) => self.shortcut.end(task_run).await,
+            ChordActionTaskRun::Type(task_run) => self.typing.end(task_run).await,
         };
         if result.is_err() {
             play_failure_sound(&self.handle);
@@ -82,6 +90,7 @@ impl ChordActionTaskRunner {
             ChordActionTaskRun::Handler(task_run) => self.handler.abort(task_run)?,
             ChordActionTaskRun::Shell(task_run) => self.shell.abort(task_run)?,
             ChordActionTaskRun::Shortcut(task_run) => self.shortcut.abort(task_run)?,
+            ChordActionTaskRun::Type(task_run) => self.typing.abort(task_run)?,
         };
         Ok(())
     }

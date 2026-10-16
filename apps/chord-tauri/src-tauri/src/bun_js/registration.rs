@@ -85,3 +85,78 @@ pub async fn register<'js>(
     registry.set(&id, handler_function)?;
     Ok(id)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::chord_runner::invoke_js_handler;
+    use crate::bun_js::{format_js_error, with_test_js};
+    use crate::models::HandlerChordAction;
+
+    #[tokio::test]
+    async fn repetitions_build_the_handler_once_and_share_the_run_window() {
+        let root = std::env::temp_dir().join(format!("chord-repeat-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let module = root.join("window.js");
+        std::fs::write(
+            &module,
+            r#"
+export default function buildWindowHandler() {
+    globalThis.repeatBuilds = (globalThis.repeatBuilds ?? 0) + 1;
+    return async function window(direction) {
+        await Promise.resolve();
+        (globalThis.repeatCalls ??= []).push(`${direction}@${this.focusedWindowId}`);
+    };
+}
+"#,
+        )
+        .unwrap();
+        let specifier = module.to_string_lossy().into_owned();
+        let result = with_test_js(|ctx| {
+            Box::pin(async move {
+                let result = async {
+                    let id = register(
+                        ctx.clone(),
+                        specifier,
+                        serde_json::json!({ "name": "fixture" }),
+                        "chords/macos.toml".into(),
+                        None,
+                        vec![],
+                    )
+                    .await?;
+                    let mut space = HandlerChordAction {
+                        handler_id: id,
+                        event_args: vec!["NEXT".into()],
+                        input: "/ws]".into(),
+                        sequence_id: None,
+                        assign_to: None,
+                        keyboard_event: None,
+                        focused_window_id: Some(42),
+                    };
+                    // `3/ws]` repeats inside one task.
+                    invoke_js_handler(ctx.clone(), &space, Some("dev.fixture".into()), 3).await?;
+                    // Loops and paused runs start each iteration as a task of their own.
+                    space.focused_window_id = Some(7);
+                    for _ in 0..3 {
+                        invoke_js_handler(ctx.clone(), &space, Some("dev.fixture".into()), 1)
+                            .await?;
+                    }
+                    // Without a captured window, handlers see null rather than a stale value.
+                    space.focused_window_id = None;
+                    invoke_js_handler(ctx.clone(), &space, None, 1).await?;
+                    assert_eq!(ctx.eval::<u32, _>("globalThis.repeatBuilds")?, 1);
+                    assert_eq!(
+                        ctx.eval::<String, _>("globalThis.repeatCalls.join(',')")?,
+                        "NEXT@42,NEXT@42,NEXT@42,NEXT@7,NEXT@7,NEXT@7,NEXT@null"
+                    );
+                    Ok::<(), rbun::Error>(())
+                }
+                .await;
+                result.map_err(|error| anyhow::anyhow!(format_js_error(&ctx, error)))
+            })
+        })
+        .await;
+        let _ = std::fs::remove_dir_all(&root);
+        result.unwrap();
+    }
+}

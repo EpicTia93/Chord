@@ -30,12 +30,12 @@ there is a single overall timeout and no polling loop. Every panel is canceled.
 Rust's `file_picker_tests` cover scope priority, fallback, deduplication,
 preservation of the actual foreground app, and the protected core namespace.
 
-Keyboard lifecycle tests live in `caps_listener.rs`, including exclusive/denied
-devices, duplicate matches, unplug/replug, and panic containment. The ignored
-`native_listener_stops_and_restarts` and `reads_native_caps_lock_without_changing_it`
-tests exercise the real IOKit APIs without posting input or toggling Caps Lock:
+Caps key tests live in `caps_remap.rs` (mapping merge, holder liveness, restoring
+displaced entries), `caps_lock_guard.rs` (toggle rules against a simulated
+computer), `caps_guardian.rs` (agent definition) and `tap.rs` (decoding the
+remapped key). The ignored `reads_native_caps_lock_without_changing_it` test
+exercises the real IOKit API without posting input or toggling Caps Lock:
 
 ```sh
-cargo test --manifest-path apps/chord-tauri/src-tauri/Cargo.toml --lib native_listener_stops_and_restarts -- --ignored
 cargo test --manifest-path apps/chord-tauri/src-tauri/Cargo.toml --lib reads_native_caps_lock_without_changing_it -- --ignored
 ```

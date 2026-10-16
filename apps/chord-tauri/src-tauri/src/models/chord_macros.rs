@@ -158,6 +158,34 @@ impl ChordMacros {
         }
     }
 
+    /// Text has no Tab, so a complete named reference selects itself. Numbered
+    /// buffers stay references, as when typed. Missing definitions stay pending.
+    pub fn resolve_named(&self, mut input: &str) -> Result<Option<String>> {
+        let mut output = String::new();
+        while !input.is_empty() {
+            let length = match parse_macro_reference(input) {
+                Some((ChordMacroName::Named(_), length)) => {
+                    let Some(expanded) = self.expand(&input[..length])? else {
+                        return Ok(None);
+                    };
+                    output.push_str(&expanded);
+                    length
+                }
+                Some((ChordMacroName::Buffer(_), length)) => {
+                    output.push_str(&input[..length]);
+                    length
+                }
+                None => {
+                    let character = input.chars().next().unwrap();
+                    output.push(character);
+                    character.len_utf8()
+                }
+            };
+            input = &input[length..];
+        }
+        Ok(Some(output))
+    }
+
     fn expand_into(
         &self,
         mut input: &str,
@@ -198,7 +226,10 @@ impl ChordMacros {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ChordCommand, ChordRepeat, Key};
+    use crate::models::{
+        ChordCommand, ChordRepeat, ChordRunConfig, ChordStep, Key, expand_typed_buffer,
+        select_escape,
+    };
 
     fn named(name: &str) -> ChordMacroName {
         ChordMacroName::Named(name.into())
@@ -239,8 +270,8 @@ mod tests {
         let saved = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let restarted = ChordMacros::from_persistent(saved).unwrap();
         assert_eq!(
-            restarted.expand(r"/ws\=alias=").unwrap().as_deref(),
-            Some("/ws1720x864")
+            restarted.expand(r"/wd\=alias=").unwrap().as_deref(),
+            Some("/wd1720x864")
         );
         assert!(restarted.expand(r"\1").unwrap().is_none());
         for digit in 0..=9 {
@@ -340,7 +371,7 @@ mod tests {
     fn references_round_trip_and_named_references_require_a_closing_equals() {
         for input in [
             r"\1\2\3\4\5\6\7\8\9",
-            r"/ws\=window-size=",
+            r"/wd\=window-dimensions=",
             r"a\=name=b",
             r"\=1=",
         ] {
@@ -353,21 +384,21 @@ mod tests {
             r"\==",
             r"\=name\1",
             r"\=name",
-            r"/ws\=window-size",
+            r"/wd\=window-dimensions",
         ] {
             assert!(Key::parse_sequence(input).is_err(), "{input}");
         }
         let mut macros = ChordMacros::default();
         macros.set(ChordMacroName::Buffer(1), "1720x864".into());
-        macros.set(named("window-size"), r"\1".into());
-        for input in [r"/ws\1", r"/ws\=window-size="] {
+        macros.set(named("window-dimensions"), r"\1".into());
+        for input in [r"/wd\1", r"/wd\=window-dimensions="] {
             assert_eq!(
                 macros.expand(input).unwrap().as_deref(),
-                Some("/ws1720x864")
+                Some("/wd1720x864")
             );
         }
         assert_eq!(
-            macros.expand(r"a\=window-size=b").unwrap().as_deref(),
+            macros.expand(r"a\=window-dimensions=b").unwrap().as_deref(),
             Some("a1720x864b")
         );
         macros.set(named("1"), "named".into());
@@ -377,7 +408,7 @@ mod tests {
         );
         macros.set(ChordMacroName::Buffer(1), "800x600".into());
         assert_eq!(
-            macros.expand(r"\=window-size=").unwrap().as_deref(),
+            macros.expand(r"\=window-dimensions=").unwrap().as_deref(),
             Some("800x600")
         );
         macros.set(ChordMacroName::Buffer(1), String::new());
@@ -390,26 +421,95 @@ mod tests {
         macros.set(named("repeat"), "12".into());
         macros.set(named("settings"), "0,".into());
         macros.set(ChordMacroName::Buffer(1), r"a\up".into());
+        let typed = |input: &str| -> Vec<Key> {
+            input
+                .chars()
+                .map(|c| c.to_string().parse().unwrap())
+                .collect()
+        };
+        // Tab inlines a named macro; typing a buffer's digit inlines the buffer.
+        let mut input = select_escape(&typed(r"\=rep"), &macros).unwrap().unwrap();
+        input.extend(typed(r"\1"));
+        let input = expand_typed_buffer(&input, &macros).unwrap();
         assert_eq!(
-            ChordCommand::parse(&Key::parse_sequence(r"\=repeat=\1").unwrap(), &macros).unwrap(),
+            ChordCommand::parse(&input, &[], &macros).unwrap(),
             ChordCommand::Run {
-                keys: Key::parse_sequence(r"a\up").unwrap(),
-                repeat: ChordRepeat::Times(12)
+                steps: vec![ChordStep::Chord(Key::parse_sequence(r"a\up").unwrap())],
+                repeat: ChordRepeat::Times(12),
+                config: ChordRunConfig::default(),
             }
         );
         assert_eq!(
-            ChordCommand::parse(&Key::parse_sequence(r"\=settings=").unwrap(), &macros).unwrap(),
+            ChordCommand::parse(
+                &select_escape(&typed(r"\=s"), &macros).unwrap().unwrap(),
+                &[],
+                &macros
+            )
+            .unwrap(),
             ChordCommand::Meta {
                 keys: Key::parse_sequence("0,").unwrap()
             }
         );
         macros.set(ChordMacroName::Buffer(2), "12".into());
         assert_eq!(
-            ChordCommand::parse(&Key::parse_sequence(r"0h\2").unwrap(), &macros).unwrap(),
+            ChordCommand::parse(&typed(r"0h\2"), &[], &macros).unwrap(),
             ChordCommand::Meta {
                 keys: Key::parse_sequence("0h12").unwrap()
             }
         );
+    }
+
+    #[test]
+    fn saved_enter_key_presses_separate_steps_only_after_a_count() {
+        let mut macros = ChordMacros::default();
+        for target in [named("steps"), ChordMacroName::Buffer(1)] {
+            macros
+                .update(target, Some(r"ab\ncd".into()), None, |_| Ok(()))
+                .unwrap();
+        }
+        let typed = |input: &str| -> Vec<Key> {
+            input
+                .chars()
+                .map(|c| c.to_string().parse().unwrap())
+                .collect()
+        };
+        let run = |chords: &[&str], times| ChordCommand::Run {
+            steps: chords
+                .iter()
+                .map(|chord| ChordStep::Chord(Key::parse_sequence(chord).unwrap()))
+                .collect(),
+            repeat: ChordRepeat::Times(times),
+            config: ChordRunConfig::default(),
+        };
+        for input in [
+            typed(r"3\1"),
+            select_escape(&typed(r"3\=st"), &macros).unwrap().unwrap(),
+        ] {
+            assert_eq!(
+                ChordCommand::parse(&input, &[], &macros).unwrap(),
+                run(&["ab", "cd"], 3)
+            );
+        }
+        // Without a count, Enter is just another key in the chord.
+        assert_eq!(
+            ChordCommand::parse(&typed(r"\1"), &[], &macros).unwrap(),
+            run(&[r"ab\ncd"], 1)
+        );
+    }
+
+    #[test]
+    fn text_selects_complete_named_references_and_keeps_numbered_buffers() {
+        let mut macros = ChordMacros::default();
+        macros.set(ChordMacroName::Buffer(1), "800x600".into());
+        macros.set(named("size"), r"\1".into());
+        assert_eq!(
+            macros
+                .resolve_named(r"/wd\=size=\1\up\n")
+                .unwrap()
+                .as_deref(),
+            Some(r"/wd800x600\1\up\n")
+        );
+        assert_eq!(macros.resolve_named(r"a\=missing=").unwrap(), None);
     }
 
     #[test]
@@ -422,7 +522,7 @@ mod tests {
                 .map(|c| c.to_string().parse().unwrap())
                 .collect::<Vec<Key>>();
             assert_eq!(
-                ChordCommand::parse(&keys, &macros).unwrap(),
+                ChordCommand::parse(&keys, &[], &macros).unwrap(),
                 ChordCommand::Pending
             );
         }

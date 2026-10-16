@@ -142,6 +142,17 @@ pub enum ChordTaskAction {
     Shortcut(ShortcutChordAction),
     Shell(ShellChordAction),
     Handler(HandlerChordAction),
+    Type(TypeChordAction),
+}
+
+/// Text typed into the focused app by a quoted step such as `'hello'`.
+#[typeshare]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypeChordAction {
+    pub text: String,
+    /// Pauses between characters, used in order and cycled. Empty types instantly.
+    pub intervals_ms: Vec<u32>,
 }
 
 #[typeshare]
@@ -184,4 +195,8 @@ pub struct HandlerChordAction {
     pub sequence_id: Option<String>,
     pub assign_to: Option<String>,
     pub keyboard_event: Option<ChordKeyboardEvent>,
+    /// Window focused when the completed input started running, available as
+    /// `this.focusedWindowId`. Every repetition, loop iteration, and chord in the
+    /// run receives the same window.
+    pub focused_window_id: Option<u32>,
 }

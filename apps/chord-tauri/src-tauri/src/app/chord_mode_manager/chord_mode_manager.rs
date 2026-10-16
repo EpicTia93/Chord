@@ -52,6 +52,18 @@ impl ChordModeManager {
         self.input_manager.handle_key_event(key_event)
     }
 
+    pub fn is_inserting(&self) -> bool {
+        self.input_manager.is_inserting()
+    }
+
+    pub fn handle_insert_key_event(&self, key_event: &KeyEvent) -> Result<()> {
+        self.input_manager.handle_insert_key_event(key_event)
+    }
+
+    pub fn finish_insert(&self) -> Result<()> {
+        self.input_manager.finish_insert()
+    }
+
     pub fn execute_sequence(&self, sequence: &str) -> Result<()> {
         self.input_manager.execute_sequence(sequence)
     }

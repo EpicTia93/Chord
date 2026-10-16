@@ -192,6 +192,8 @@ impl ChordPackage {
                             sequence_id,
                             assign_to: emit.assign_to.clone(),
                             keyboard_event,
+                            // Captured when the run starts, after dispatch.
+                            focused_window_id: None,
                         }),
                         num_times,
                     })

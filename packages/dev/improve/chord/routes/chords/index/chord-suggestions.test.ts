@@ -25,6 +25,7 @@ test("backslash suggests defined macros first, followed by special keys", () => 
     "\\left",
     "\\down",
     "\\right",
+    "\\n",
   ]);
   expect(suggestions.slice(0, 4).map((item) => item.kind)).toEqual([
     "macro",
@@ -34,7 +35,11 @@ test("backslash suggests defined macros first, followed by special keys", () => 
   ]);
   expect(suggestions[0]!.description).toBe("800x600");
   expect(suggestions[1]!.description).toBe("(empty sequence)");
+  // Tab skips numbered buffers, which need no selection.
+  expect(suggest("\\")!.active).toBe("\\=1temporary=");
+  expect(suggest("\\", [])!.active).toBe("\\up");
   expect(suggest("\\", [])!.suggestions.map((item) => item.kind)).toEqual([
+    "key",
     "key",
     "key",
     "key",
@@ -63,24 +68,31 @@ test("suggestions narrow as an escape is typed anywhere in the input", () => {
   ).toBe("\\1");
 });
 
-test("completed escapes stop suggesting and a later backslash starts a fresh list", () => {
-  for (const input of [
-    "",
-    "/ws",
-    "/ws\\1",
-    "/ws\\1x",
-    "\\=window-size=",
-    "\\=window-size=x",
-    "\\up",
-    "a\\leftb",
-  ]) {
+test("only numbered buffers complete without Tab; other escapes keep suggesting", () => {
+  for (const input of ["", "/ws", "/ws\\1", "/ws\\1x"]) {
     expect(suggest(input)).toBeNull();
   }
+  for (const [input, active] of [
+    ["\\=window-size=", "\\=window-size="],
+    ["a\\up", "\\up"],
+    ["a\\n", "\\n"],
+  ] as const) {
+    const result = suggest(input)!;
+    expect(result.suggestions.map((item) => item.reference)).toEqual([active]);
+    expect(result.active).toBe(active);
+  }
+  for (const input of ["\\=window-size=x", "a\\leftb"]) {
+    expect(suggest(input)!.suggestions).toEqual([]);
+    expect(suggest(input)!.active).toBeUndefined();
+  }
+  // Physical keys, including Enter, are ordinary keys rather than escapes.
   expect(getEscapeSuggestions(normalizeChordTokens(["ArrowUp"]), macros)).toBeNull();
+  expect(getEscapeSuggestions(normalizeChordTokens(["KeyA", "Enter"]), macros)).toBeNull();
   expect(suggest("\\=window-size=a\\=win")!.suggestions.map((item) => item.reference)).toEqual([
     "\\=window-size=",
   ]);
   expect(suggest("\\1\\")!.suggestions[0]!.reference).toBe("\\1");
+  expect(suggest("\\1\\")!.active).toBe("\\=1temporary=");
 });
 
 test("suggestions reflect current definitions without retaining deleted macros", () => {

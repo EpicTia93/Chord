@@ -131,6 +131,7 @@ fn action(id: &str, mode: &str, keyboard: bool, args: Vec<toml::Value>, count: u
                     false,
                 )
             }),
+            focused_window_id: None,
         },
         app_id: Some("dev.benchmark".into()),
         count,

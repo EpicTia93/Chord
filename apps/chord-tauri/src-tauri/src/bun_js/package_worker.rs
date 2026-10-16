@@ -535,6 +535,7 @@ mod tests {
                     &[],
                     false,
                 )),
+                focused_window_id: None,
             },
             app_id: Some("dev.fixture".into()),
             count: 1,

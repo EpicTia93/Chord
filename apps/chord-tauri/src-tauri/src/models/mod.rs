@@ -7,6 +7,8 @@ mod chord_command;
 pub use chord_command::*;
 mod chord_macros;
 pub use chord_macros::*;
+mod chord_escape;
+pub use chord_escape::*;
 mod chord_hint;
 pub use chord_hint::*;
 mod chord_trigger;

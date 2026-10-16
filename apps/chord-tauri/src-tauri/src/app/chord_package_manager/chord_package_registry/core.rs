@@ -275,6 +275,7 @@ mod tests {
             let event = crate::models::ChordInputEvent {
                 input: Key::parse_sequence("0x").unwrap(),
                 application_id: app,
+                ..Default::default()
             };
             assert_eq!(package.matching_global_chords(&event).len(), 1);
         }

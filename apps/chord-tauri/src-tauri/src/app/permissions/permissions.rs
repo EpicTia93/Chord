@@ -1,7 +1,7 @@
 use crate::state::{AppPermissionsObservable, AppPermissionsState, Observable};
 use anyhow::{Context, Result};
 use nject::injectable;
-use std::sync::{Mutex, mpsc};
+use std::sync::mpsc;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_autostart::ManagerExt;
 
@@ -9,45 +9,21 @@ use tauri_plugin_autostart::ManagerExt;
 pub struct AppPermissions {
     observable: AppPermissionsObservable,
     handle: AppHandle,
-    #[inject(Mutex::new(None))]
-    last_input_monitoring: Mutex<Option<InputMonitoringAccess>>,
     #[inject(ExecutableIdentity::capture())]
     executable: ExecutableIdentity,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputMonitoringAccess {
-    Granted,
-    Denied,
-    Unknown,
-    Unexpected(u32),
-}
-
-impl InputMonitoringAccess {
-    fn from_raw(value: u32) -> Self {
-        match value {
-            0 => Self::Granted,
-            1 => Self::Denied,
-            2 => Self::Unknown,
-            other => Self::Unexpected(other),
-        }
-    }
-
-    pub fn is_granted(self) -> bool {
-        self == Self::Granted
-    }
-}
-
+/// Accessibility is the only permission Chord's input needs: it covers the active
+/// event tap, and macOS counts it as Input Monitoring too (`IOHIDCheckAccess` reports
+/// listen access granted for an app that only has Accessibility).
 #[derive(Debug, Clone, Copy)]
 pub struct InputPermissions {
     pub accessibility: bool,
-    pub input_monitoring: InputMonitoringAccess,
 }
 
 impl InputPermissions {
     pub const UNAVAILABLE: Self = Self {
         accessibility: false,
-        input_monitoring: InputMonitoringAccess::Unknown,
     };
 }
 
@@ -114,53 +90,32 @@ impl AppPermissions {
     }
 
     pub fn can_intercept_input(&self) -> bool {
-        self.observable.get_state().is_ok_and(|state| {
-            state.is_accessibility_enabled == Some(true)
-                && state.is_input_monitoring_enabled == Some(true)
-        })
+        self.observable
+            .get_state()
+            .is_ok_and(|state| state.is_accessibility_enabled == Some(true))
     }
 
-    /// Queries macOS without collapsing undecided or unexpected results into denial.
     pub fn check_now() -> InputPermissions {
         InputPermissions {
             accessibility: macos_accessibility_client::accessibility::application_is_trusted(),
-            input_monitoring: input_monitoring_access(),
         }
     }
 
-    /// Re-checks both permissions and publishes them only when they changed.
-    /// Cheap enough to poll: both calls are local TCC lookups.
+    /// Re-checks the permission and publishes it only when it changed.
+    /// Cheap enough to poll: a local TCC lookup.
     pub fn refresh_if_changed(&self) -> Result<InputPermissions> {
         let permissions = Self::check_now();
         let accessibility = permissions.accessibility;
-        let input_monitoring = permissions.input_monitoring.is_granted();
         let previous = self.observable.get_state()?;
-        let changed = previous.is_accessibility_enabled != Some(accessibility)
-            || previous.is_input_monitoring_enabled != Some(input_monitoring);
-        let status_changed = {
-            let mut status = self
-                .last_input_monitoring
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let changed = *status != Some(permissions.input_monitoring);
-            *status = Some(permissions.input_monitoring);
-            changed
-        };
-        if changed || status_changed {
+        if previous.is_accessibility_enabled != Some(accessibility) {
             log::info!(
-                "Permissions: accessibility={accessibility} input_monitoring={:?} (executable {:?})",
-                permissions.input_monitoring,
+                "Permissions: accessibility={accessibility} (executable {:?})",
                 std::env::current_exe().ok()
             );
-            if (!accessibility || !input_monitoring)
-                && let Some(reason) = self.executable.invalidation()
-            {
+            if !accessibility && let Some(reason) = self.executable.invalidation() {
                 log::warn!("{reason}");
             }
-        }
-        if changed {
             self.observable.set_state(|prev| AppPermissionsState {
-                is_input_monitoring_enabled: Some(input_monitoring),
                 is_accessibility_enabled: Some(accessibility),
                 ..prev
             })?;
@@ -168,12 +123,8 @@ impl AppPermissions {
         Ok(permissions)
     }
 
-    pub async fn load(&self) -> Result<(bool, bool)> {
-        let permissions = self.refresh_if_changed()?;
-        Ok((
-            permissions.accessibility,
-            permissions.input_monitoring.is_granted(),
-        ))
+    pub async fn load(&self) -> Result<bool> {
+        Ok(self.refresh_if_changed()?.accessibility)
     }
 
     pub fn toggle_autostart(&self) -> Result<()> {
@@ -235,62 +186,5 @@ pub fn request_accessibility_prompt_sync<R: Runtime>(handle: &AppHandle<R>) -> R
 
 #[cfg(not(target_os = "macos"))]
 pub fn request_accessibility_prompt_sync<R: Runtime>(_handle: &AppHandle<R>) -> Result<()> {
-    Ok(())
-}
-
-/// `kIOHIDRequestTypeListenEvent`
-const IOHID_REQUEST_TYPE_LISTEN_EVENT: u32 = 1;
-
-#[cfg(target_os = "macos")]
-#[link(name = "IOKit", kind = "framework")]
-unsafe extern "C" {
-    fn IOHIDRequestAccess(request: u32) -> u8;
-    fn IOHIDCheckAccess(request: u32) -> u32;
-}
-
-#[cfg(target_os = "macos")]
-fn input_monitoring_access() -> InputMonitoringAccess {
-    // SAFETY: plain IOKit query without pointers.
-    InputMonitoringAccess::from_raw(unsafe { IOHIDCheckAccess(IOHID_REQUEST_TYPE_LISTEN_EVENT) })
-}
-
-#[cfg(not(target_os = "macos"))]
-fn input_monitoring_access() -> InputMonitoringAccess {
-    InputMonitoringAccess::Granted
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn undecided_and_unexpected_access_fail_closed_without_claiming_denial() {
-        assert_eq!(
-            InputMonitoringAccess::from_raw(1),
-            InputMonitoringAccess::Denied
-        );
-        assert_eq!(
-            InputMonitoringAccess::from_raw(2),
-            InputMonitoringAccess::Unknown
-        );
-        assert_eq!(
-            InputMonitoringAccess::from_raw(99),
-            InputMonitoringAccess::Unexpected(99)
-        );
-        for raw in [1, 2, 99] {
-            assert!(!InputMonitoringAccess::from_raw(raw).is_granted());
-        }
-        assert!(InputMonitoringAccess::from_raw(0).is_granted());
-    }
-}
-
-/// Registers this process for Input Monitoring (`kIOHIDRequestTypeListenEvent`) on the main thread.
-pub fn register_input_monitoring_sync<R: Runtime>(handle: &AppHandle<R>) -> Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        run_on_main_thread_sync(handle, || unsafe {
-            IOHIDRequestAccess(IOHID_REQUEST_TYPE_LISTEN_EVENT);
-        })?;
-    }
     Ok(())
 }

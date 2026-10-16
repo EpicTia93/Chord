@@ -15,6 +15,10 @@ pub struct ChordInputEvent {
 
     /// The ID of the application the chord execution applied to.
     pub application_id: Option<String>,
+
+    /// Text typed in insert mode for each quote in `input`, in order. Such a quote
+    /// appears in `input` as an adjacent `''` pair.
+    pub quotes: Vec<String>,
 }
 
 /// A mapping from a sequence (or pattern) of keys to a series of actions.

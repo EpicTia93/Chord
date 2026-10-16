@@ -5,11 +5,13 @@ use keycode::KeyMappingCode::*;
 use std::str::FromStr;
 use typeshare::typeshare;
 
-const SPECIAL_KEY_SEQUENCES: [(&str, KeyMappingCode); 4] = [
+/// Text notation for keys without a sequence character.
+pub(crate) const SPECIAL_KEY_SEQUENCES: [(&str, KeyMappingCode); 5] = [
     (r"\up", ArrowUp),
     (r"\left", ArrowLeft),
     (r"\down", ArrowDown),
     (r"\right", ArrowRight),
+    (r"\n", Enter),
 ];
 
 #[derive(Debug, PartialEq)]
@@ -538,6 +540,78 @@ impl Key {
         Some(char)
     }
 
+    /// The character this key types on a US layout, including whitespace keys.
+    pub fn text_char(&self, shift: bool) -> Option<char> {
+        match self.0 {
+            Space => Some(' '),
+            Enter => Some('\n'),
+            Tab => Some('\t'),
+            _ => self.to_char(shift),
+        }
+    }
+
+    /// The key and Shift state that type `character` on a US layout.
+    pub fn for_text_char(character: char) -> Option<(Self, bool)> {
+        const TEXT_KEYS: [KeyMappingCode; 50] = [
+            KeyA,
+            KeyB,
+            KeyC,
+            KeyD,
+            KeyE,
+            KeyF,
+            KeyG,
+            KeyH,
+            KeyI,
+            KeyJ,
+            KeyK,
+            KeyL,
+            KeyM,
+            KeyN,
+            KeyO,
+            KeyP,
+            KeyQ,
+            KeyR,
+            KeyS,
+            KeyT,
+            KeyU,
+            KeyV,
+            KeyW,
+            KeyX,
+            KeyY,
+            KeyZ,
+            Digit1,
+            Digit2,
+            Digit3,
+            Digit4,
+            Digit5,
+            Digit6,
+            Digit7,
+            Digit8,
+            Digit9,
+            Digit0,
+            Minus,
+            Equal,
+            BracketLeft,
+            BracketRight,
+            Backslash,
+            Semicolon,
+            Quote,
+            Comma,
+            Period,
+            Slash,
+            Backquote,
+            Space,
+            Enter,
+            Tab,
+        ];
+        TEXT_KEYS.into_iter().map(Key).find_map(|key| {
+            [false, true]
+                .into_iter()
+                .find(|&shift| key.text_char(shift) == Some(character))
+                .map(|shift| (key, shift))
+        })
+    }
+
     pub fn to_sequence_char(&self) -> Option<char> {
         let char = match self.0 {
             KeyA => 'a',
@@ -596,12 +670,12 @@ impl Key {
     pub fn serialize_sequence(sequence: &[Key]) -> Option<String> {
         let mut result = String::new();
         for key in sequence {
-            match key.0 {
-                ArrowUp => result.push_str(r"\up"),
-                ArrowLeft => result.push_str(r"\left"),
-                ArrowDown => result.push_str(r"\down"),
-                ArrowRight => result.push_str(r"\right"),
-                _ => result.push(key.to_sequence_char()?),
+            match SPECIAL_KEY_SEQUENCES
+                .iter()
+                .find(|(_, code)| *code == key.0)
+            {
+                Some((token, _)) => result.push_str(token),
+                None => result.push(key.to_sequence_char()?),
             }
         }
         Some(result)
@@ -617,7 +691,7 @@ impl Key {
                 .map(|(token, _)| token.len())
                 .or_else(|| super::parse_macro_reference(remaining).map(|(_, length)| length))
                 .ok_or_else(|| anyhow::anyhow!(
-                    "invalid special-key escape in chord sequence {sequence:?}: expected an arrow key, \\1–\\9, or \\=<name>="
+                    "invalid special-key escape in chord sequence {sequence:?}: expected \\up, \\left, \\down, \\right, \\n, \\1–\\9, or \\=<name>="
                 ))?;
             remaining = &remaining[length..];
         }
@@ -671,6 +745,32 @@ mod sequence_tests {
             ]
         );
         assert_eq!(Key::serialize_sequence(&keys).as_deref(), Some(sequence));
+    }
+
+    #[test]
+    fn text_characters_round_trip_through_keys_and_shift() {
+        let text = "Hello, World! {x_y} \"q\" 'a\\b'\n\t`~0)";
+        for character in text.chars() {
+            let (key, shift) = Key::for_text_char(character).unwrap();
+            assert_eq!(key.text_char(shift), Some(character), "{character:?}");
+        }
+        assert_eq!(Key::for_text_char('A'), Some((Key(KeyA), true)));
+        assert_eq!(Key::for_text_char(' '), Some((Key(Space), false)));
+        assert_eq!(Key::for_text_char('é'), None);
+    }
+
+    #[test]
+    fn enter_has_newline_notation_like_any_other_special_key() {
+        let keys = Key::parse_sequence(r"ab\ncd").unwrap();
+        assert_eq!(
+            keys,
+            [Key(KeyA), Key(KeyB), Key(Enter), Key(KeyC), Key(KeyD)]
+        );
+        assert_eq!(Key::serialize_sequence(&keys).as_deref(), Some(r"ab\ncd"));
+        assert_eq!(
+            Key::parse_sequence(r"\n\up").unwrap(),
+            [Key(Enter), Key(ArrowUp)]
+        );
     }
 
     #[test]

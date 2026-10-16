@@ -171,6 +171,11 @@ pub(crate) async fn invoke_js_handler<'js>(
         }
         let handler_context = Object::new(ctx.clone())?;
         handler_context.set("focusedAppId", frontmost_id.clone())?;
+        // Selected once for the whole run, so repetitions never follow focus elsewhere.
+        match action.focused_window_id {
+            Some(id) => handler_context.set("focusedWindowId", id)?,
+            None => handler_context.set("focusedWindowId", Value::new_null(ctx.clone()))?,
+        }
         handler_context.set("input", action.input.clone())?;
         if let Some(event) = &action.keyboard_event {
             let event_value = rbun::serde::to_value(ctx.clone(), event)?;
@@ -232,6 +237,7 @@ mod tests {
                 &[Key(KeyMappingCode::ShiftLeft)],
                 false,
             )),
+            focused_window_id: None,
         }
     }
 
