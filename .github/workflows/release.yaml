@@ -1,8 +1,11 @@
-name: beta
+name: release
 
-# Every push to beta publishes a downloadable build to the rolling `beta`
-# release. Assets are replaced in place, so the download URLs and the updater
-# endpoint are stable.
+# Every push to `beta` or `prod` publishes a downloadable build to the rolling
+# release of the same name: `beta` is a prerelease built with the beta channel
+# identity, and `prod` is the latest release built with the production identity
+# from tauri.conf.json. Assets are replaced in place, so the download URLs and
+# the updater endpoints are stable. Promoting a build to production means
+# pushing its commit to `prod`.
 #
 # Signing: each Apple / Tauri signing step is gated on its secret (these live at
 # the org level). With them present the build is Developer ID signed and
@@ -14,16 +17,19 @@ on:
   push:
     branches:
       - beta
+      - prod
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  RELEASE_TAG: beta
+  RELEASE_TAG: ${{ github.ref_name }}
 
 jobs:
   build:
+    # A manual run from any other branch would publish a release named after it.
+    if: ${{ github.ref_name == 'beta' || github.ref_name == 'prod' }}
     permissions:
       contents: write
     strategy:
@@ -142,8 +148,9 @@ jobs:
         run: bun install --frozen-lockfile
 
       # tauri.conf.json points `bundle.macOS.frameworks` at the local rbun
-      # checkout. The checked-in beta config supplies the channel identity;
-      # this generated overlay only points the build at the downloaded dylib.
+      # checkout. tauri.conf.json carries the production identity and the
+      # checked-in beta config overrides it for beta; this generated overlay
+      # only points the build at the downloaded dylib.
       - name: Build CI framework config
         id: cfg
         run: |
@@ -216,9 +223,13 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          channel_config=""
+          if [ "$RELEASE_TAG" = beta ]; then
+            channel_config="src-tauri/tauri.beta.conf.json"
+          fi
           bun tauri build \
             --target ${{ matrix.target }} \
-            --config src-tauri/tauri.beta.conf.json \
+            ${channel_config:+--config "$channel_config"} \
             --config ${{ steps.cfg.outputs.config }} \
             --bundles ${{ steps.bundles.outputs.bundles }}
 
@@ -301,21 +312,32 @@ jobs:
             gatekeeper="This build is not notarized; on first launch, right-click the app and choose **Open**."
           fi
           rm -f assets/gatekeeper.txt
-          notes="Automatic beta build from \`beta\` @ ${short}. Download the \`.dmg\` for your Mac: \`aarch64\` for Apple Silicon, \`x86_64\` for Intel. $gatekeeper"
+          # Production is the repository's latest release, which the production
+          # updater endpoint (releases/latest) resolves to; beta never is.
+          if [ "$RELEASE_TAG" = prod ]; then
+            title="Chord"
+            channel="production"
+            flags=(--prerelease=false --latest)
+          else
+            title="Chord Beta"
+            channel="beta"
+            flags=(--prerelease --latest=false)
+          fi
+          notes="Automatic $channel build from \`$RELEASE_TAG\` @ ${short}. Download the \`.dmg\` for your Mac: \`aarch64\` for Apple Silicon, \`x86_64\` for Intel. $gatekeeper"
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             # Move the rolling tag onto this commit, then refresh the release.
             git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
             git push -f origin "refs/tags/$RELEASE_TAG"
-            gh release edit "$RELEASE_TAG" --notes "$notes" --prerelease --latest=false
+            gh release edit "$RELEASE_TAG" --title "$title" --notes "$notes" "${flags[@]}"
           else
             # Pin the tag to the commit that was actually built rather than
             # whatever the default branch points at by the time this runs.
             gh release create "$RELEASE_TAG" \
               --target "$GITHUB_SHA" \
-              --title "Chord Beta" \
+              --title "$title" \
               --notes "$notes" \
-              --prerelease
+              "${flags[@]}"
           fi
           # `--clobber` replaces the previous build's assets in place. Names are
           # commit-free, so the download URLs are stable across releases.

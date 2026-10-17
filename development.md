@@ -344,13 +344,22 @@ target/debug/chord run ./script.ts export-name arg1 arg2
 
 ## Releases
 
-Every push to `beta` runs [`.github/workflows/release.yaml`](.github/workflows/release.yaml), which
-builds the app for Apple Silicon and Intel and uploads the DMGs to the rolling
-[`beta`](https://github.com/KeyChord/Chord/releases/tag/beta) prerelease. Beta uses the
-`com.leonsilicon.chord.beta` application identifier, while local development uses
+Every push to `beta` or `prod` runs [`.github/workflows/release.yaml`](.github/workflows/release.yaml),
+which builds the app for Apple Silicon and Intel and uploads the DMGs to the rolling release of the
+same name. [`beta`](https://github.com/KeyChord/Chord/releases/tag/beta) is a prerelease;
+[`prod`](https://github.com/KeyChord/Chord/releases/tag/prod) is marked as the repository's latest
+release, so `https://github.com/KeyChord/Chord/releases/latest` always serves production. Beta uses
+the `com.leonsilicon.chord.beta` application identifier, while local development uses
 `com.leonsilicon.chord.development` and production uses `com.leonsilicon.chord`. This keeps each
 channel's settings, packages, caches, logs, and other application-scoped data separate. Each run
 replaces the previous assets, so the download URLs stay stable.
+
+To promote a build to production, push its commit to `prod`, for example the current `dev`:
+
+```sh
+jj bookmark set prod -r dev --allow-backwards
+jj git push -b prod --allow-new
+```
 
 CI cannot build the vendored Bun itself — that takes ~30 minutes. Instead
 [`KeyChord/rbun`](https://github.com/KeyChord/rbun) builds `libbun_embed.dylib` once per Bun source
