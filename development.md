@@ -367,8 +367,11 @@ commit and publishes it as a `bun-embed-<sha>` release asset; Chord's workflow d
 points the build at it with `RBUN_BUN_LIB_DIR` plus a generated overlay config that overrides
 `bundle.macOS.frameworks`. Both repos are checked out side by side so that the relative `rbun` path
 in `Cargo.toml` resolves — the dylib satisfies the linker, but cargo still needs rbun's source
-manifest. After bumping the Bun submodule in rbun, let its `build-bun-embed` workflow finish before
-the next Chord release build.
+manifest. The workflow downloads the release for the Bun commit that rbun's checkout pins, because
+Chord links against that commit's embedding API. After bumping the Bun submodule in rbun, let its
+`build-bun-embed` workflow finish before the next Chord release build. The Intel leg is optional:
+rbun's Intel build of Bun does not currently finish within its job limit, so without a matching
+Intel dylib the release ships Apple Silicon only.
 
 ### Code signing
 

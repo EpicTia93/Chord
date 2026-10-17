@@ -39,10 +39,15 @@ jobs:
           - runner: macos-15
             arch: aarch64
             target: aarch64-apple-darwin
+          # KeyChord/rbun's Intel build of Bun does not currently finish within
+          # its job limit, so this leg can lack a matching libbun_embed. It is
+          # optional: the release then ships Apple Silicon only.
           - runner: macos-15-intel
             arch: x86_64
             target: x86_64-apple-darwin
+            optional: true
     runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.optional == true }}
     env:
       # `secrets` is not available in step-level `if:`, but `env` is.
       APPLE_CERT_B64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_FILE_BASE64 }}
@@ -121,21 +126,16 @@ jobs:
           dir="$RUNNER_TEMP/bun-embed"
           mkdir -p "$dir"
           asset="libbun_embed-${{ matrix.target }}.dylib"
-          # Newest bun-embed release that actually carries this arch's asset:
-          # the two matrix legs publish independently, so the newest tag may
-          # briefly have only one of them.
-          tag=""
-          for candidate in $(gh release list -R KeyChord/rbun --limit 100 \
-                --order desc --json tagName,createdAt \
-                --jq 'sort_by(.createdAt) | reverse | .[].tagName | select(startswith("bun-embed-"))'); do
-            if gh release view "$candidate" -R KeyChord/rbun --json assets \
-                 --jq '.assets[].name' 2>/dev/null | grep -qx "$asset"; then
-              tag="$candidate"
-              break
-            fi
-          done
-          if [ -z "$tag" ]; then
-            echo "::error::no bun-embed release in KeyChord/rbun provides $asset; run its build-bun-embed workflow first"
+          # rbun tags each build by the Bun source commit it pins, and Chord
+          # links against that commit's embedding API, so only that release
+          # fits; an older one fails at link time on a missing symbol. The rbun
+          # checkout holds the submodule's commit without fetching Bun.
+          sha="$(git -C ../rbun ls-tree HEAD packages/com/github/oven-sh/bun/src | awk '{print $3}')"
+          test -n "$sha" || { echo "::error::rbun does not pin a Bun submodule commit"; exit 1; }
+          tag="bun-embed-${sha:0:12}"
+          if ! gh release view "$tag" -R KeyChord/rbun --json assets \
+               --jq '.assets[].name' 2>/dev/null | grep -qx "$asset"; then
+            echo "::error::KeyChord/rbun has no $asset for Bun ${sha:0:12} (release $tag); run its build-bun-embed workflow first"
             exit 1
           fi
           echo "using $tag / $asset"
@@ -323,7 +323,12 @@ jobs:
             channel="beta"
             flags=(--prerelease --latest=false)
           fi
-          notes="Automatic $channel build from \`$RELEASE_TAG\` @ ${short}. Download the \`.dmg\` for your Mac: \`aarch64\` for Apple Silicon, \`x86_64\` for Intel. $gatekeeper"
+          if [ -e assets/Chord-x86_64.dmg ]; then
+            download="Download the \`.dmg\` for your Mac: \`aarch64\` for Apple Silicon, \`x86_64\` for Intel."
+          else
+            download="Download \`Chord-aarch64.dmg\`; this build is for Apple Silicon only."
+          fi
+          notes="Automatic $channel build from \`$RELEASE_TAG\` @ ${short}. $download $gatekeeper"
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             # Move the rolling tag onto this commit, then refresh the release.
