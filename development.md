@@ -358,7 +358,7 @@ To promote a build to production, push its commit to `prod`, for example the cur
 
 ```sh
 jj bookmark set prod -r dev --allow-backwards
-jj git push -b prod --allow-new
+jj git push -b prod
 ```
 
 CI cannot build the vendored Bun itself — that takes ~30 minutes. Instead

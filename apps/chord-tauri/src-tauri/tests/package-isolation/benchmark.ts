@@ -71,7 +71,7 @@ const artifact = artifacts
   );
 if (!artifact) throw new Error("Cargo did not return the library test executable");
 
-const reports = [];
+const reports: any[] = [];
 for (let run = 1; run <= runs; run++) {
   console.log("\nPaired benchmark run " + run + "/" + runs);
   const path = output + "/run-" + run + ".json";
