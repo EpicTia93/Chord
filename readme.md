@@ -4,6 +4,8 @@
 
 _Chord_ lets you bind actions to key sequences while **keeping your existing shortcuts untouched**.
 
+> 🚧 Under Construction! Docs may be outdated and/or incomplete...
+
 ## How does it work?
 
 Chords are sequences of non-modifier keys that correspond to actions. Most of the time, these actions are defined as existing keyboard shortcuts in an application.
