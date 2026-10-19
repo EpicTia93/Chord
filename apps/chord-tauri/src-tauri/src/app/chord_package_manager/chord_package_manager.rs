@@ -3,7 +3,8 @@ use crate::app::chord_package_manager::chord_package_registry::ChordPackageRegis
 use crate::app::chord_package_manager::{ChordJsPackage, ChordPackage, ChordReference};
 use crate::app::state::AppSingleton;
 use crate::models::{
-    ChordEventTrigger, ChordInput, ChordInputEvent, ChordsFileImportOverride, CompiledChordsFile,
+    ChordEventTrigger, ChordInput, ChordInputEvent, ChordTrigger, ChordsFileImportOverride,
+    CompiledChordsFile,
     CompiledChordsFileHandler, FilePathslug, ParsedChordsFile, RawChordPackage, RawChordsFile,
     CORE_CHORD_PACKAGE, is_core_chords_file,
 };
@@ -773,6 +774,22 @@ impl ChordPackageManager {
                     .any(|action| action.trigger() == ChordEventTrigger::Input)
             })
             .map(|(package, _)| package)
+    }
+
+    /// Whether the input is a whole chord that nothing longer extends, so latched Chord mode
+    /// can run it without waiting for more keys. Pattern chords always wait for Return or
+    /// Space, since a pattern can keep matching as more keys arrive.
+    pub fn is_unambiguous_match(&self, event: &ChordInputEvent) -> bool {
+        let contexts = self.matching_chord_contexts(event);
+        !contexts.is_empty()
+            && contexts
+                .iter()
+                .all(|(_, reference)| matches!(reference.chord.trigger, ChordTrigger::Keys(_)))
+            && !self
+                .packages
+                .read()
+                .values()
+                .any(|package| package.has_longer_chord(event))
     }
 
     /// Lifecycle events visit all matching chords, in app/global and package priority order.

@@ -283,6 +283,26 @@ impl ChordInputManager {
             KeyEvent::Press(key @ Key(KeyMappingCode::Quote)) => {
                 self.handle_unshifted_key_press(key, &event)?;
             }
+            // Chord mode is latched, so Return runs what has been typed, like Caps does but
+            // without holding the input.
+            KeyEvent::Press(Key(KeyMappingCode::Enter)) => {
+                let state = self.observable.get_state()?;
+                if state.input.is_empty() {
+                    self.dispatch_current_buffer(&press_triggers, &event)?;
+                } else {
+                    self.execute_input(
+                        &state.input,
+                        &state.quotes,
+                        &[
+                            ChordEventTrigger::Keydown,
+                            ChordEventTrigger::Keypress,
+                            ChordEventTrigger::Input,
+                        ],
+                        &event,
+                        false,
+                    )?;
+                }
+            }
             KeyEvent::Press(key) => {
                 if is_shift_pressed && Self::should_clear_key_buffer_on_shifted_press(key) {
                     self.clear_key_buffer()?;
@@ -292,9 +312,37 @@ impl ChordInputManager {
                 } else {
                     self.handle_unshifted_key_press(key, &event)?;
                 }
+                if key.0 != KeyMappingCode::Backspace {
+                    self.run_if_unambiguous(&event)?;
+                }
             }
         }
         Ok(())
+    }
+
+    /// Runs the buffer as soon as it is a whole chord that no longer chord extends. Anything
+    /// else stays in the buffer until more keys, Return or Space arrive.
+    fn run_if_unambiguous(&self, event: &ChordKeyboardEvent) -> Result<()> {
+        let state = self.observable.get_state()?;
+        if state.inserting || state.input.is_empty() {
+            return Ok(());
+        }
+        let probe = ChordInputEvent {
+            input: state.input.clone(),
+            application_id: self.handle.app_state().frontmost().frontmost()?,
+            quotes: state.quotes.clone(),
+        };
+        let chord_package_manager = self.handle.app_state().chord_package_manager();
+        if !chord_package_manager.is_unambiguous_match(&probe) {
+            return Ok(());
+        }
+        self.execute_input(
+            &state.input,
+            &state.quotes,
+            &[ChordEventTrigger::Input],
+            event,
+            false,
+        )
     }
 
     fn resolve_dispatch(

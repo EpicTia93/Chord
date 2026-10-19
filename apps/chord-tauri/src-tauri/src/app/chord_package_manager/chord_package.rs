@@ -73,6 +73,27 @@ impl ChordPackage {
             .collect()
     }
 
+    /// Whether a chord for this event's app or the global scope is typed with the event's
+    /// input followed by more keys, so the input is only the start of that chord.
+    pub fn has_longer_chord(&self, event: &ChordInputEvent) -> bool {
+        let extends = |chord: &Chord| {
+            matches!(&chord.trigger, ChordTrigger::Keys(keys)
+                if keys.len() > event.input.len() && keys.starts_with(&event.input))
+        };
+        let in_app = event.application_id.as_deref().is_some_and(|app_id| {
+            let pathslug =
+                PathBuf::from(format!("chords/{}/macos.toml", app_id.replace(".", "/")));
+            self.compiled_chords_files
+                .get(&pathslug)
+                .is_some_and(|file| file.chords.iter().any(|chord| extends(chord)))
+        });
+        in_app
+            || self
+                .global_chords
+                .iter()
+                .any(|reference| extends(&reference.chord))
+    }
+
     pub fn resolve_chord_from_input_event(
         &self,
         event: &ChordInputEvent,

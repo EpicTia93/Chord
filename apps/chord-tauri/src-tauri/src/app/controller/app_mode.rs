@@ -63,11 +63,15 @@ impl AppController {
                     }
                     return Ok(());
                 }
-                chord_mode_manager.handle_key_event(&key_event);
-
-                if key_event == &KeyEvent::Release(Key(KeyMappingCode::Space)) {
-                    self.set_idle_mode();
+                // Chord mode is latched: Caps+Space turns it on, and Esc or Caps+Space
+                // again turns it off. Releasing Space or Caps keeps it active.
+                if input.activates_chord_mode()
+                    || key_event == &KeyEvent::Press(Key(KeyMappingCode::Escape))
+                {
+                    self.set_idle_mode()?;
+                    return Ok(());
                 }
+                chord_mode_manager.handle_key_event(&key_event);
             }
             AppMode::Idle => {
                 if input.activates_chord_mode() {

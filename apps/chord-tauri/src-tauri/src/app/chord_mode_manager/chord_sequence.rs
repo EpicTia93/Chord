@@ -621,6 +621,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_chord_is_ambiguous_only_while_a_longer_chord_starts_with_its_keys() {
+        let package = fixture(
+            r#"
+name = "Latched"
+[chords]
+ab = { shell = "true" }
+abc = { shell = "true" }
+x = { shell = "true" }
+"#,
+        );
+        // `ab` is a chord, but `abc` extends it; a longer prefix or an unrelated key is not.
+        assert!(package.has_longer_chord(&typed("a")));
+        assert!(package.has_longer_chord(&typed("ab")));
+        assert!(!package.has_longer_chord(&typed("abc")));
+        assert!(!package.has_longer_chord(&typed("x")));
+        assert!(!package.has_longer_chord(&typed("z")));
+    }
+
     /// Typing `input`, then pressing Tab.
     fn tab(sequence: &ChordSequence, input: &str) -> ChordInputEvent {
         ChordInputEvent {
