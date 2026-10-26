@@ -17,7 +17,7 @@ use nject::injectable;
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::AppHandle;
 use tauri_plugin_store::StoreExt;
 use tokio::sync::oneshot;
@@ -41,6 +41,10 @@ pub struct ChordInputManager {
     /// Counts executions, so a run that fails later only marks its own chord.
     #[inject(Arc::new(AtomicU64::new(0)))]
     executions: Arc<AtomicU64>,
+    /// Set when the last key event ran a chord without holding its input, which ends
+    /// latched Chord mode.
+    #[inject(AtomicBool::new(false))]
+    ran_chord: AtomicBool,
     handle: AppHandle,
     observable: ChordInputObservable,
     execution_observable: ChordExecutionObservable,
@@ -149,8 +153,14 @@ impl ChordInputManager {
         self.reset_matching_chords()
     }
 
+    /// Whether the last key event ran a chord that should end latched Chord mode.
+    pub fn take_ran_chord(&self) -> bool {
+        self.ran_chord.swap(false, Ordering::SeqCst)
+    }
+
     // Called only while Chord mode is active.
     pub fn handle_key_event(&self, key_event: &KeyEvent) -> Result<()> {
+        self.ran_chord.store(false, Ordering::SeqCst);
         let fresh_press = should_handle_held_key_event(&mut self.held_keys.lock(), key_event);
         let (KeyEvent::Press(key) | KeyEvent::Release(key)) = key_event;
         let keyboard = self.handle.app_state().keyboard();
@@ -626,6 +636,10 @@ impl ChordInputManager {
         if let Some(event) = dispatch.input_event.clone() {
             self.set_executed_event(event)?;
             self.run_dispatch(dispatch, hold_input)?;
+            // Caps runs hold the input and keep Chord mode open for the next chord.
+            if !hold_input {
+                self.ran_chord.store(true, Ordering::SeqCst);
+            }
             return self.reset_matching_chords();
         }
         let error = dispatch.error.take();

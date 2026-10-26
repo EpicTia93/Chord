@@ -52,6 +52,10 @@ impl ChordModeManager {
         self.input_manager.handle_key_event(key_event)
     }
 
+    pub fn take_ran_chord(&self) -> bool {
+        self.input_manager.take_ran_chord()
+    }
+
     pub fn is_inserting(&self) -> bool {
         self.input_manager.is_inserting()
     }
