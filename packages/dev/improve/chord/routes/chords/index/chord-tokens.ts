@@ -1,8 +1,12 @@
 import getPrettyKey from 'pretty-key';
 
+/** Italian (Pro) legends for keys whose US character is not Chord syntax, as in the native sequence chars. */
+const ITALIAN_LEGENDS: Record<string, string> = { ';': 'ò', '[': 'è' };
+export const ITALIAN_LEGEND_CHARS = new Set(Object.values(ITALIAN_LEGENDS));
+
 export function normalizeToken(token: string) {
 	const pretty = getPrettyKey(token);
-	const normalized = pretty === '_' ? '-' : pretty;
+	const normalized = ITALIAN_LEGENDS[pretty] ?? (pretty === '_' ? '-' : pretty);
 	return normalized.length === 1 ? normalized.toUpperCase() : normalized;
 }
 

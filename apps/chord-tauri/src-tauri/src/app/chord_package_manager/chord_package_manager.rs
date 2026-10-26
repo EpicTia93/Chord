@@ -5,7 +5,7 @@ use crate::app::state::AppSingleton;
 use crate::models::{
     ChordEventTrigger, ChordInput, ChordInputEvent, ChordTrigger, ChordsFileImportOverride,
     CompiledChordsFile,
-    CompiledChordsFileHandler, FilePathslug, ParsedChordsFile, RawChordPackage, RawChordsFile,
+    CompiledChordsFileHandler, FilePathslug, Key, ParsedChordsFile, RawChordPackage, RawChordsFile,
     CORE_CHORD_PACKAGE, is_core_chords_file,
 };
 use crate::state::{
@@ -592,8 +592,9 @@ impl ChordPackageManager {
                         // don't start with `chords/@`
                         for chord in &chords_file.chords {
                             let first_char = chord.raw_trigger.chars().next();
-                            let is_non_alphanumeric =
-                                first_char.map(|c| !c.is_alphanumeric()).unwrap_or(false);
+                            let is_non_alphanumeric = first_char
+                                .map(|c| !c.is_alphanumeric() || Key::is_symbol_sequence_char(c))
+                                .unwrap_or(false);
 
                             if is_non_alphanumeric || is_core_chords_file(&name, pathslug) {
                                 global_chords.push(ChordReference {

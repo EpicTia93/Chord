@@ -652,10 +652,11 @@ impl Key {
             Digit0 => '0',
             Minus => '-',
             Equal => '=',
-            BracketLeft => '[',
+            BracketLeft => 'è',
             BracketRight => ']',
             Backslash => '\\',
-            Semicolon => ';',
+            // Italian (Pro) legends; the US characters `;` and `[` still parse.
+            Semicolon => 'ò',
             Quote => '\'',
             Comma => ',',
             Period => '.',
@@ -665,6 +666,12 @@ impl Key {
         };
 
         Some(char)
+    }
+
+    /// Whether `character` names a symbol key in a sequence, including Italian legends
+    /// like `ò` that Unicode counts as letters.
+    pub fn is_symbol_sequence_char(character: char) -> bool {
+        Self::from_str(&character.to_string()).is_ok_and(|key| !key.is_letter() && !key.is_digit())
     }
 
     pub fn serialize_sequence(sequence: &[Key]) -> Option<String> {
@@ -757,6 +764,18 @@ mod sequence_tests {
         assert_eq!(Key::for_text_char('A'), Some((Key(KeyA), true)));
         assert_eq!(Key::for_text_char(' '), Some((Key(Space), false)));
         assert_eq!(Key::for_text_char('é'), None);
+    }
+
+    #[test]
+    fn italian_legends_name_their_keys_and_us_characters_still_parse() {
+        let keys = Key::parse_sequence("òoè").unwrap();
+        assert_eq!(keys, [Key(Semicolon), Key(KeyO), Key(BracketLeft)]);
+        assert_eq!(Key::parse_sequence(";o[").unwrap(), keys);
+        assert_eq!(Key::serialize_sequence(&keys).as_deref(), Some("òoè"));
+        assert!(Key::is_symbol_sequence_char('ò'));
+        assert!(Key::is_symbol_sequence_char('/'));
+        assert!(!Key::is_symbol_sequence_char('o'));
+        assert!(!Key::is_symbol_sequence_char('1'));
     }
 
     #[test]
@@ -918,10 +937,10 @@ impl FromStr for Key {
                 "0" => Digit0,
                 "-" | "minus" => Minus,
                 "=" | "equal" | "equals" => Equal,
-                "[" => BracketLeft,
+                "[" | "è" | "È" => BracketLeft,
                 "]" => BracketRight,
                 "\\" | "backslash" => Backslash,
-                ";" | "semicolon" => Semicolon,
+                ";" | "ò" | "Ò" | "semicolon" => Semicolon,
                 "'" | "quote" => Quote,
                 "," | "comma" => Comma,
                 "." | "period" => Period,

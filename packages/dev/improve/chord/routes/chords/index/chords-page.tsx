@@ -3,7 +3,7 @@ import { cn } from '@chord/com.npmjs.utils-cn';
 import { Kbd } from '@chord/dev.improve.chord.components.ui.kbd';
 import { StateQueries, useChordExecutionState, useChordInputState, useChordMacrosState, useChordPackageManagerState, useChordPanelState, useFrontmostState, useKeyboardState } from '@chord/dev.improve.chord.lib.state';
 import { emit, listen } from '@tauri-apps/api/event';
-import { getCommandLabel, getCommandPrefix, getRangeHint, isDeletionOf, normalizeChordTokens, normalizeToken, withQuoteTexts } from '#chord-tokens';
+import { getCommandLabel, getCommandPrefix, getRangeHint, isDeletionOf, ITALIAN_LEGEND_CHARS, normalizeChordTokens, normalizeToken, withQuoteTexts } from '#chord-tokens';
 import { getEscapeSuggestions } from '#chord-suggestions';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
@@ -242,8 +242,9 @@ export function ChordsPageContent({
 					&& hint.pattern.range.keys.every(key => /^\d$/.test(normalizeToken(key)))) {
 					repeatCountHints.add(hint);
 				}
-				// bad check for global
-				if (hint.rawPattern[0]?.toUpperCase() === hint.rawPattern[0]) {
+				// bad check for global; Italian legends like `ò` are symbol keys
+				const first = hint.rawPattern[0];
+				if (first && (first.toUpperCase() === first || ITALIAN_LEGEND_CHARS.has(first))) {
 					hintsByRawPattern[hint.rawPattern] = hint;
 				}
 			}

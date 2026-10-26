@@ -10,6 +10,11 @@ test('typed escapes keep their keys until Tab replaces them natively', () => {
 	expect(normalizeChordTokens(['KeyA', 'ArrowUp', 'Enter'])).toEqual(['A', '↑', '↩']);
 });
 
+test('Italian legends replace US characters for symbol keys that are not syntax', () => {
+	expect(normalizeChordTokens(['Semicolon', ';', 'ò', 'BracketLeft', '[', 'è'])).toEqual(['Ò', 'Ò', 'Ò', 'È', 'È', 'È']);
+	expect(normalizeChordTokens(['Slash', 'Quote', 'Backslash'])).toEqual(['/', "'", '\\']);
+});
+
 test('completion prefixes preserve meta commands and numeric chord arguments', () => {
 	expect(prefixTokens('')).toEqual([]);
 	expect(prefixTokens('0h12')).toEqual([]);
