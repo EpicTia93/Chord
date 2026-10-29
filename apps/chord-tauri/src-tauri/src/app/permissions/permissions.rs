@@ -84,6 +84,11 @@ impl ExecutableIdentity {
 
 impl AppPermissions {
     pub(super) fn init(&self) -> Result<()> {
+        let is_autostart_enabled = self.handle.autolaunch().is_enabled()?;
+        self.observable.set_state(|prev| AppPermissionsState {
+            is_autostart_enabled: Some(is_autostart_enabled),
+            ..prev
+        })?;
         // The input supervisor (`AppKeyboard`) polls `refresh_if_changed` and
         // owns listener registration; nothing to subscribe to here.
         Ok(())
@@ -128,23 +133,17 @@ impl AppPermissions {
     }
 
     pub fn toggle_autostart(&self) -> Result<()> {
-        let state = self.observable.get_state()?;
-        let Some(is_autostart_enabled) = state.is_autostart_enabled else {
-            anyhow::bail!("app not ready")
-        };
-        if is_autostart_enabled {
-            self.handle.autolaunch().disable()?;
-            self.observable.set_state(|prev| AppPermissionsState {
-                is_autostart_enabled: Some(false),
-                ..prev
-            })?;
+        let autolaunch = self.handle.autolaunch();
+        if autolaunch.is_enabled()? {
+            autolaunch.disable()?;
         } else {
-            self.handle.autolaunch().enable()?;
-            self.observable.set_state(|prev| AppPermissionsState {
-                is_autostart_enabled: Some(true),
-                ..prev
-            })?;
+            autolaunch.enable()?;
         }
+        let is_autostart_enabled = autolaunch.is_enabled()?;
+        self.observable.set_state(|prev| AppPermissionsState {
+            is_autostart_enabled: Some(is_autostart_enabled),
+            ..prev
+        })?;
         Ok(())
     }
 }

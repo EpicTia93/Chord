@@ -180,6 +180,10 @@ fn run_app_with_cli_command(startup_command: Option<tauri_app::scripting::CliApp
                 return;
             }
 
+            if tauri_app::startup::is_autostart_args(&args) {
+                return;
+            }
+
             let settings = handle.app_state().settings();
             if let Err(error) = settings.ui.open() {
                 log::error!("Failed to show settings window for existing instance: {error}");

@@ -59,7 +59,7 @@ function LaunchOnLoginCardContent({
 						label="Launch on Login"
 						description="Start Chord automatically after you sign in. The app launches hidden and reuses a single instance."
 						checked={permissions.isAutostartEnabled === true}
-						disabled={toggleAutostartMutation.isPending}
+						disabled={permissions.isAutostartEnabled == null || toggleAutostartMutation.isPending}
 						onCheckedChange={() => {
 							toggleAutostartMutation.mutate();
 						}}
@@ -95,6 +95,11 @@ function LaunchOnLoginCardContent({
 						}}
 					/>
 				</div>
+				{toggleAutostartMutation.error && (
+					<p role="alert" className="mt-3 text-sm text-destructive">
+						{toggleAutostartMutation.error.message}
+					</p>
+				)}
 			</CardContent>
 		</Card>
 	);

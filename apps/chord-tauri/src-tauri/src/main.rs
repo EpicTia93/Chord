@@ -9,6 +9,9 @@ mod cli_worker;
 #[derive(Debug, Parser)]
 #[command(name = "chord", about = "shortcuts reimagined")]
 struct Cli {
+    /// Start quietly when launched by the login agent.
+    #[arg(long, hide = true)]
+    autostart: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -99,10 +102,9 @@ fn main() {
     let cli = Cli::parse();
 
     #[cfg(target_os = "macos")]
-    let _runtime_lease = match chords_lib::dev_runtime::acquire(matches!(
-        &cli.command,
-        None | Some(Commands::AppChord { .. })
-    )) {
+    let _runtime_lease = match chords_lib::dev_runtime::acquire(
+        cli.autostart || matches!(&cli.command, None | Some(Commands::AppChord { .. })),
+    ) {
         Ok(lease) => lease,
         Err(error) => {
             eprintln!("Failed to acquire development runtime lease: {error:#}");
@@ -334,6 +336,14 @@ mod tests {
     fn parses_ui_command() {
         let cli = Cli::try_parse_from(["chord", "ui"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Ui)));
+    }
+
+    #[test]
+    fn parses_login_launch_without_a_subcommand() {
+        let cli = Cli::try_parse_from(["chord", "--autostart"]).unwrap();
+        assert!(cli.autostart);
+        assert!(cli.command.is_none());
+        assert!(!Cli::try_parse_from(["chord"]).unwrap().autostart);
     }
 
     #[test]
