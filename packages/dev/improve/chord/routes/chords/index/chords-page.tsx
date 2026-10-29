@@ -234,6 +234,8 @@ export function ChordsPageContent({
 		globalChords.push(...chordPackage.globalChords);
 
 		for (const [relpath, file] of Object.entries(chordPackage.compiledChordsFiles)) {
+			// Vendored files only become active through imports, as in the native resolver.
+			if (relpath.split('/')[1]?.startsWith('@')) continue;
 			const bundleId = relpath.split('/').slice(1, -1).join('.');
 			for (const hint of file.chordHints) {
 				if (chordPackage.name === '@keychord/chords-chord'
@@ -326,7 +328,6 @@ export function ChordsPageContent({
 	const hintSequences = [
 		...baseHintSequences.map(hint => ({ ...hint, tokens: [...commandPrefixTokens, ...hint.tokens] })),
 		...(commandPrefixTokens.length === 0 ? builtinHints : []),
-		...(commandPrefixTokens.length === 0 ? [{ tokens: ['1'], description: 'Loop chord' }] : []),
 	];
 	const rangeHints = baseRangeHints.flatMap(hint => getRangeHint(hint, commandPrefix) ?? []);
 	const floatingHint = hintSequences.findLast(hint =>

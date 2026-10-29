@@ -12,6 +12,30 @@ afterAll(() => {
 });
 
 for (const layout of [ChordLayout.SidebarLeft, ChordLayout.FloatingBottom]) {
+  test(`${layout} excludes inactive vendored menu hints`, () => {
+    const path = "chords/@keychord/chords-menu/chords/macos.toml";
+    const html = renderToString(<ChordsPageContent
+      chordInputData={{ input: [], quotes: [], inserting: false }}
+      chordPanelData={{ isVisible: true, layout }}
+      keyboardData={{ isCapsPressed: false, isShiftPressed: false }}
+      frontmostData={{ filePickerActive: false }}
+      chordPackageManagerData={{ packages: [{
+        name: "@keychord/chords-com.apple",
+        rawChordsFiles: {}, globalChords: [],
+        compiledChordsFiles: {
+          [path]: {
+            name: "macOS Menu Bar", pathslug: path, meta: {}, handlers: [], chords: [],
+            chordHints: [{ rawPattern: "-", pattern: { keys: ["Minus"] }, description: "Menu Bar" }],
+          },
+        },
+      }] }}
+      chordExecutionData={{ loops: [], metaCommands: [], haltLoopTemplate: "0h{id}" }}
+      chordMacrosData={{ entries: [] }}
+    />);
+    expect(html).not.toContain("Menu Bar");
+    expect(html).not.toContain("Loop chord");
+  });
+
   test(`${layout} displays macros before arrow escapes when backslash is typed`, () => {
     const props: Parameters<typeof ChordsPageContent>[0] = {
       chordInputData: { input: ["Backslash"], quotes: [], inserting: false },

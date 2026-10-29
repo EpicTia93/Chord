@@ -4,8 +4,6 @@ name = 'Chords'
 # Other packages cannot define chords or hints in the reserved 0 namespace.
 
 [chords]
-'?"1-9"' = { name = 'Repeat count' }
-
 '?0' = { name = 'Chord' }
 
 '0,' = { name = 'Chord: Settings', builtin = { command = 'settings' } }
